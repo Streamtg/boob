@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"EverythingSuckz/fsb/config"
@@ -27,12 +26,16 @@ func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 }
 
 func supportedMediaFilter(m *types.Message) (bool, error) {
-	if m.Media == nil {
+	if not := m.Media == nil; not {
 		return false, dispatcher.EndGroups
 	}
 	switch m.Media.(type) {
-	case *tg.MessageMediaDocument, *tg.MessageMediaPhoto:
+	case *tg.MessageMediaDocument:
 		return true, nil
+	case *tg.MessageMediaPhoto:
+		return true, nil
+	case tg.MessageMediaClass:
+		return false, dispatcher.EndGroups
 	default:
 		return false, nil
 	}
@@ -44,7 +47,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	if peerChatId.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
-
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
@@ -52,7 +54,11 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	if config.ValueOf.ForceSubChannel != "" {
 		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
-		if err != nil || !isSubscribed {
+		if err != nil {
+			utils.Logger.Error("Error checking subscription status",
+				zap.Error(err),
+				zap.Int64("userID", chatId),
+				zap.String("channel", config.ValueOf.ForceSubChannel))
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
@@ -64,7 +70,24 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			markup := &tg.ReplyInlineMarkup{
 				Rows: []tg.KeyboardButtonRow{row},
 			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOptions{
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
+				Markup: markup,
+			})
+			return dispatcher.EndGroups
+		}
+		if !isSubscribed {
+			row := tg.KeyboardButtonRow{
+				Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonURL{
+						Text: "Join Channel",
+						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
+					},
+				},
+			}
+			markup := &tg.ReplyInlineMarkup{
+				Rows: []tg.KeyboardButtonRow{row},
+			}
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
 				Markup: markup,
 			})
 			return dispatcher.EndGroups
@@ -72,7 +95,10 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
-	if err != nil || !supported {
+	if err != nil {
+		return err
+	}
+	if !supported {
 		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
 		return dispatcher.EndGroups
 	}
@@ -92,12 +118,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Extraer extensión real del archivo
-	ext := filepath.Ext(file.FileName)
-	if len(ext) > 0 && ext[0] == '.' {
-		ext = ext[1:]
-	}
-
 	fullHash := utils.PackFile(
 		file.FileName,
 		file.FileSize,
@@ -106,20 +126,25 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	)
 	hash := utils.GetShortHash(fullHash)
 
-	// Link directo al worker para streaming
-	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d&hash=%s&ext=%s", messageID, hash, ext)
+	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
 
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
-		if err := statsCache.RecordFileProcessed(file.FileSize); err != nil {
+		err := statsCache.RecordFileProcessed(file.FileSize)
+		if err != nil {
 			utils.Logger.Error("Failed to record file statistics", zap.Error(err))
 		}
 	}
 
+	// Mensaje sin enlace de descarga ni botón Download
 	message := fmt.Sprintf("📄 File Name: %s\n\n⏳ Link validity is 24 hours", file.FileName)
 
 	row := tg.KeyboardButtonRow{}
+
+	// Botón Stream/Download apunta al Worker, para videos y archivos binarios
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
+		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
+		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
 		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 			Text: "Stream / Download",
 			URL:  streamURL,
@@ -130,11 +155,19 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		Rows: []tg.KeyboardButtonRow{row},
 	}
 
-	_, err = ctx.Reply(u, message, &ext.ReplyOptions{
-		Markup:           markup,
-		NoWebpage:        false,
-		ReplyToMessageId: u.EffectiveMessage.ID,
-	})
+	if strings.Contains(link, "http://localhost") {
+		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+			NoWebpage:        false,
+			ReplyToMessageId: u.EffectiveMessage.ID,
+		})
+	} else {
+		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+			Markup:           markup,
+			NoWebpage:        false,
+			ReplyToMessageId: u.EffectiveMessage.ID,
+		})
+	}
+
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
