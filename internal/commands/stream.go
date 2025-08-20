@@ -20,13 +20,14 @@ import (
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	log := m.log.Named("start")
 	defer log.Sugar().Info("Loaded")
+
 	dispatcher.AddHandler(
 		handlers.NewMessage(nil, sendLink),
 	)
 }
 
 func supportedMediaFilter(m *types.Message) (bool, error) {
-	if not := m.Media == nil; not {
+	if m.Media == nil {
 		return false, dispatcher.EndGroups
 	}
 	switch m.Media.(type) {
@@ -41,12 +42,48 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
+// Devuelve tamaño legible en KB, MB o GB
+func formatFileSize(bytes int) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
+	default:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
+	}
+}
+
+// Asigna emoji según tipo de archivo
+func fileTypeEmoji(mime string) string {
+	switch {
+	case strings.Contains(mime, "video"):
+		return "🎬"
+	case strings.Contains(mime, "image"):
+		return "🖼️"
+	case strings.Contains(mime, "audio"):
+		return "🎵"
+	case strings.Contains(mime, "pdf"):
+		return "📕"
+	case strings.Contains(mime, "zip"), strings.Contains(mime, "rar"):
+		return "🗜️"
+	default:
+		return "📄"
+	}
+}
+
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
 	if peerChatId.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
+
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
@@ -54,11 +91,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	if config.ValueOf.ForceSubChannel != "" {
 		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
-		if err != nil {
-			utils.Logger.Error("Error checking subscription status",
-				zap.Error(err),
-				zap.Int64("userID", chatId),
-				zap.String("channel", config.ValueOf.ForceSubChannel))
+		if err != nil || !isSubscribed {
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
@@ -67,29 +100,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 					},
 				},
 			}
-			markup := &tg.ReplyInlineMarkup{
-				Rows: []tg.KeyboardButtonRow{row},
-			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
-			return dispatcher.EndGroups
-		}
-		if !isSubscribed {
-			row := tg.KeyboardButtonRow{
-				Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonURL{
-						Text: "Join Channel",
-						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
-					},
-				},
-			}
-			markup := &tg.ReplyInlineMarkup{
-				Rows: []tg.KeyboardButtonRow{row},
-			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
+			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{Markup: markup})
 			return dispatcher.EndGroups
 		}
 	}
@@ -118,30 +130,26 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	fullHash := utils.PackFile(
-		file.FileName,
-		file.FileSize,
-		file.MimeType,
-		file.ID,
+	// Formato amigable y visual
+	emoji := fileTypeEmoji(file.MimeType)
+	size := formatFileSize(file.FileSize)
+	message := fmt.Sprintf(
+		"%s *File Name:* %s\n%s *File Type:* %s\n💾 *Size:* %s\n\n⏳ Link validity: 24 hours",
+		emoji, file.FileName,
+		emoji, file.MimeType,
+		size,
 	)
-	hash := utils.GetShortHash(fullHash)
 
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
+	hash := utils.GetShortHash(fullHash)
 	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
 
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
-		err := statsCache.RecordFileProcessed(file.FileSize)
-		if err != nil {
-			utils.Logger.Error("Failed to record file statistics", zap.Error(err))
-		}
+		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Mensaje sin enlace de descarga ni botón Download
-	message := fmt.Sprintf("📄 File Name: %s\n\n⏳ Link validity is 24 hours", file.FileName)
-
 	row := tg.KeyboardButtonRow{}
-
-	// Botón Stream/Download apunta al Worker, para videos y archivos binarios
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
@@ -150,24 +158,13 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			URL:  streamURL,
 		})
 	}
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	markup := &tg.ReplyInlineMarkup{
-		Rows: []tg.KeyboardButtonRow{row},
-	}
-
-	if strings.Contains(link, "http://localhost") {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
-	} else {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			Markup:           markup,
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
-	}
-
+	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+		Markup:           markup,
+		NoWebpage:        false,
+		ReplyToMessageId: u.EffectiveMessage.ID,
+	})
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
