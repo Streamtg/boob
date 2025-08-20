@@ -15,6 +15,7 @@ import (
 	"github.com/celestix/gotgproto/storage"
 	"github.com/celestix/gotgproto/types"
 	"github.com/gotd/td/tg"
+	"go.uber.org/zap"
 )
 
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
