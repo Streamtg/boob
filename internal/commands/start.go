@@ -27,6 +27,6 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	ctx.Reply(u, "Need a direct streamable link to a file? Send it my way! 🤓\n\nJoin my Update Channel @yoelbots 🗿 for more updates.\n\nLink validity: 24 hours ⏳\n\nPro Tip: Use 1DM Browser for lightning-fast downloads! 🔥\n\n📊 Use /stats to view bot statistics", nil)
+	ctx.Reply(u, "Hey there! 👋 I’m your personal file streaming assistant.\n\nSend me any file yes, any format 📂 and I’ll turn it into a direct download link or streaming link instantly! ⚡\n\nWhat you can do:\n✅ Upload files of any type\n✅ Get a direct download link instantly\n✅ Stream your media without hassle\n✅ Share links with friends easily\n\nHow to start:\n1️⃣ Send me a file\n2️⃣ Wait a few seconds ⏱️\n3️⃣ Receive your download & streaming link 🚀\n\nNeed help? Contact us at @yoelbots anytime!\n\n💡 To see the bot statistics, just type /stats 📊", nil)
 	return dispatcher.EndGroups
 }
