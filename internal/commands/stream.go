@@ -130,7 +130,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 	message := fmt.Sprintf(
-		"%s File Name: %s\n%s File Type: %s\n💾 Size: %s\n\n⏳ Link validity is 24 hours",
+		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
