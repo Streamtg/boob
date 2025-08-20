@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// --- Función auxiliar para convertir bytes en MB/GB ---
+// humanFileSize formats bytes into KB, MB, GB
 func humanFileSize(size int64) string {
 	const (
 		KB = 1 << (10 * 1)
@@ -36,6 +36,25 @@ func humanFileSize(size int64) string {
 	}
 }
 
+// friendlyFileType returns a human-friendly label with emoji
+func friendlyFileType(mime string) string {
+	switch {
+	case strings.Contains(mime, "video"):
+		return "🎬 Video"
+	case strings.Contains(mime, "image"):
+		return "🖼️ Image"
+	case strings.Contains(mime, "audio"):
+		return "🎵 Audio"
+	case strings.Contains(mime, "pdf"):
+		return "📄 PDF Document"
+	case strings.Contains(mime, "zip"), strings.Contains(mime, "rar"), strings.Contains(mime, "tar"):
+		return "📦 Archive"
+	default:
+		return "📁 File"
+	}
+}
+
+// LoadStream registers the file handler
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	log := m.log.Named("start")
 	defer log.Sugar().Info("Loaded")
@@ -44,22 +63,20 @@ func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	)
 }
 
+// supportedMediaFilter returns true if the message contains supported media
 func supportedMediaFilter(m *types.Message) (bool, error) {
-	if not := m.Media == nil; not {
+	if m.Media == nil {
 		return false, dispatcher.EndGroups
 	}
 	switch m.Media.(type) {
-	case *tg.MessageMediaDocument:
+	case *tg.MessageMediaDocument, *tg.MessageMediaPhoto:
 		return true, nil
-	case *tg.MessageMediaPhoto:
-		return true, nil
-	case tg.MessageMediaClass:
-		return false, dispatcher.EndGroups
 	default:
 		return false, nil
 	}
 }
 
+// sendLink processes the received file and sends name, size, type, and streaming link
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -71,26 +88,10 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
+	// Check forced subscription
 	if config.ValueOf.ForceSubChannel != "" {
 		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
-		if err != nil {
-			utils.Logger.Error("Error checking subscription status",
-				zap.Error(err),
-				zap.Int64("userID", chatId),
-				zap.String("channel", config.ValueOf.ForceSubChannel))
-			row := tg.KeyboardButtonRow{
-				Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonURL{
-						Text: "Join Channel",
-						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
-					},
-				},
-			}
-			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{Markup: markup})
-			return dispatcher.EndGroups
-		}
-		if !isSubscribed {
+		if err != nil || !isSubscribed {
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
@@ -105,15 +106,14 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
+	// Check if media is supported
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
-	if err != nil {
-		return err
-	}
-	if !supported {
+	if err != nil || !supported {
 		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
 		return dispatcher.EndGroups
 	}
 
+	// Forward message to log channel
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
@@ -133,22 +133,22 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	hash := utils.GetShortHash(fullHash)
 	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
 
+	// Update statistics
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// --- Nuevo mensaje con Nombre, Tamaño y Tipo ---
+	// Build message with friendly file type
 	message := fmt.Sprintf(
-		"📄 File Name: %s\n📦 File Size: %s\n📑 File Type: %s\n\n⏳ Link validity is 24 hours",
+		"📄 File Name: %s\n📦 File Size: %s\n📝 File Type: %s",
 		file.FileName,
 		humanFileSize(file.FileSize),
-		file.MimeType,
+		friendlyFileType(file.MimeType),
 	)
 
+	// Build streaming button
 	row := tg.KeyboardButtonRow{}
-
-	// Botón Stream/Download apunta al Worker
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
