@@ -1,50 +1,3 @@
-import (
-	"fmt"
-	"path/filepath"
-	"strings"
-
-	"EverythingSuckz/fsb/config"
-	"EverythingSuckz/fsb/internal/cache"
-	"EverythingSuckz/fsb/internal/utils"
-
-	"github.com/celestix/gotgproto/dispatcher"
-	"github.com/celestix/gotgproto/dispatcher/handlers"
-	"github.com/celestix/gotgproto/ext"
-	"github.com/celestix/gotgproto/storage"
-	"github.com/celestix/gotgproto/types"
-	"github.com/gotd/td/tg"
-	"go.uber.org/zap"
-)
-
-// Función universal para detectar tipo y icono según extensión y MIME
-func getUniversalFileTypeInfo(fileName, mimeType string) (icon, typeName, ext string) {
-	ext = strings.ToUpper(strings.TrimPrefix(filepath.Ext(fileName), "."))
-	lowerExt := strings.ToLower(ext)
-
-	switch {
-	case strings.Contains(mimeType, "video") || lowerExt == "mp4" || lowerExt == "mkv" || lowerExt == "mov" || lowerExt == "avi" || lowerExt == "flv":
-		return "🎬", "Video", ext
-	case strings.Contains(mimeType, "audio") || lowerExt == "mp3" || lowerExt == "wav" || lowerExt == "flac" || lowerExt == "aac" || lowerExt == "ogg":
-		return "🎵", "Audio", ext
-	case strings.Contains(mimeType, "image") || lowerExt == "png" || lowerExt == "jpg" || lowerExt == "jpeg" || lowerExt == "gif" || lowerExt == "bmp" || lowerExt == "tiff" || lowerExt == "webp":
-		return "🖼️", "Image", ext
-	case lowerExt == "pdf" || lowerExt == "doc" || lowerExt == "docx" || lowerExt == "txt" || lowerExt == "ppt" || lowerExt == "pptx" || lowerExt == "xls" || lowerExt == "xlsx":
-		return "📄", "Document", ext
-	case lowerExt == "zip" || lowerExt == "rar" || lowerExt == "7z" || lowerExt == "tar" || lowerExt == "gz" || lowerExt == "bz2":
-		return "🗂️", "Compressed", ext
-	case lowerExt == "py" || lowerExt == "js" || lowerExt == "go" || lowerExt == "java" || lowerExt == "c" || lowerExt == "cpp" || lowerExt == "cs" || lowerExt == "ts" || lowerExt == "rb" || lowerExt == "php":
-		return "💻", "Code", ext
-	case lowerExt == "exe" || lowerExt == "msi" || lowerExt == "apk" || lowerExt == "bat" || lowerExt == "sh":
-		return "⚙️", "Installer", ext
-	case lowerExt == "ttf" || lowerExt == "otf" || lowerExt == "woff" || lowerExt == "woff2":
-		return "🔤", "Font", ext
-	case lowerExt == "csv" || lowerExt == "json" || lowerExt == "xml" || lowerExt == "db" || lowerExt == "sql":
-		return "🗃️", "Data", ext
-	default:
-		return "🧩", "Other", ext
-	}
-}
-
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -78,8 +31,9 @@ Need help? Contact us at @yoelbots anytime!
 	}
 
 	// Verificación de media
-	if u.EffectiveMessage.Media == nil {
-		ctx.Reply(u, "⚠️ Sorry, this message does not contain a file.", nil)
+	supported, err := supportedMediaFilter(u.EffectiveMessage)
+	if err != nil || !supported {
+		ctx.Reply(u, "⚠️ Sorry, this message type is unsupported.", nil)
 		return dispatcher.EndGroups
 	}
 
@@ -101,19 +55,20 @@ Need help? Contact us at @yoelbots anytime!
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
+	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
 
 	// Registro de estadísticas
 	if statsCache := cache.GetStatsCache(); statsCache != nil {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Detectar tipo de archivo universal
+	// Detección universal de tipo de archivo
 	icon, typeName, ext := getUniversalFileTypeInfo(file.FileName, file.MimeType)
 
-	// Mensaje profesional
+	// Mensaje profesional con nombre, tipo, extensión y tamaño
 	message := fmt.Sprintf("%s %s • %s • %.2f MB\n\n⏳ Link validity is 24 hours", icon, typeName, ext, float64(file.FileSize)/(1024*1024))
 
-	// Botón Stream/Download
+	// Botón Stream / Download
 	row := tg.KeyboardButtonRow{
 		Buttons: []tg.KeyboardButtonClass{
 			&tg.KeyboardButtonURL{
@@ -136,4 +91,33 @@ Need help? Contact us at @yoelbots anytime!
 	}
 
 	return dispatcher.EndGroups
+}
+
+// Función auxiliar universal para detección de tipo de archivo
+func getUniversalFileTypeInfo(fileName, mimeType string) (icon, typeName, ext string) {
+	ext = strings.ToUpper(strings.TrimPrefix(filepath.Ext(fileName), "."))
+	lowerExt := strings.ToLower(ext)
+
+	switch {
+	case strings.Contains(mimeType, "video") || lowerExt == "mp4" || lowerExt == "mkv" || lowerExt == "mov" || lowerExt == "avi" || lowerExt == "flv":
+		return "🎬", "Video", ext
+	case strings.Contains(mimeType, "audio") || lowerExt == "mp3" || lowerExt == "wav" || lowerExt == "flac" || lowerExt == "aac" || lowerExt == "ogg":
+		return "🎵", "Audio", ext
+	case strings.Contains(mimeType, "image") || lowerExt == "png" || lowerExt == "jpg" || lowerExt == "jpeg" || lowerExt == "gif" || lowerExt == "bmp" || lowerExt == "tiff" || lowerExt == "webp":
+		return "🖼️", "Image", ext
+	case lowerExt == "pdf" || lowerExt == "doc" || lowerExt == "docx" || lowerExt == "txt" || lowerExt == "ppt" || lowerExt == "pptx" || lowerExt == "xls" || lowerExt == "xlsx":
+		return "📄", "Document", ext
+	case lowerExt == "zip" || lowerExt == "rar" || lowerExt == "7z" || lowerExt == "tar" || lowerExt == "gz" || lowerExt == "bz2":
+		return "🗂️", "Compressed", ext
+	case lowerExt == "py" || lowerExt == "js" || lowerExt == "go" || lowerExt == "java" || lowerExt == "c" || lowerExt == "cpp" || lowerExt == "cs" || lowerExt == "ts" || lowerExt == "rb" || lowerExt == "php":
+		return "💻", "Code", ext
+	case lowerExt == "exe" || lowerExt == "msi" || lowerExt == "apk" || lowerExt == "bat" || lowerExt == "sh":
+		return "⚙️", "Installer", ext
+	case lowerExt == "ttf" || lowerExt == "otf" || lowerExt == "woff" || lowerExt == "woff2":
+		return "🔤", "Font", ext
+	case lowerExt == "csv" || lowerExt == "json" || lowerExt == "xml" || lowerExt == "db" || lowerExt == "sql":
+		return "🗃️", "Data", ext
+	default:
+		return "🧩", "Other", ext
+	}
 }
