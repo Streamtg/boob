@@ -1,3 +1,49 @@
+package commands
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"EverythingSuckz/fsb/config"
+	"EverythingSuckz/fsb/internal/cache"
+	"EverythingSuckz/fsb/internal/utils"
+
+	"github.com/celestix/gotgproto/dispatcher"
+	"github.com/celestix/gotgproto/dispatcher/handlers"
+	"github.com/celestix/gotgproto/ext"
+	"github.com/celestix/gotgproto/storage"
+	"github.com/celestix/gotgproto/types"
+	"github.com/gotd/td/tg"
+	"go.uber.org/zap"
+)
+
+func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
+	log := m.log.Named("start")
+	defer log.Sugar().Info("Loaded")
+	dispatcher.AddHandler(
+		handlers.NewMessage(nil, sendLink),
+	)
+}
+
+// Filtrado de media soportada
+func supportedMediaFilter(m *types.Message) (bool, error) {
+	if m.Media == nil {
+		return false, dispatcher.EndGroups
+	}
+	switch m.Media.(type) {
+	case *tg.MessageMediaDocument:
+		return true, nil
+	case *tg.MessageMediaPhoto:
+		return true, nil
+	case tg.MessageMediaClass:
+		return false, dispatcher.EndGroups
+	default:
+		return false, nil
+	}
+}
+
+// Función principal para enviar link de streaming / download
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -5,7 +51,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje de bienvenida
+	// Mensaje de bienvenida al /start
 	if u.EffectiveMessage.Text != "" && strings.HasPrefix(u.EffectiveMessage.Text, "/start") {
 		welcome := `Hey there! 👋 I’m your personal file streaming assistant.
 Send me any file yes, any format 📂 and I’ll turn it into a direct download link or streaming link instantly! ⚡
@@ -30,7 +76,7 @@ Need help? Contact us at @yoelbots anytime!
 		return dispatcher.EndGroups
 	}
 
-	// Verificación de media
+	// Verificación de media soportada
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil || !supported {
 		ctx.Reply(u, "⚠️ Sorry, this message type is unsupported.", nil)
@@ -55,7 +101,6 @@ Need help? Contact us at @yoelbots anytime!
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
-	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
 
 	// Registro de estadísticas
 	if statsCache := cache.GetStatsCache(); statsCache != nil {
