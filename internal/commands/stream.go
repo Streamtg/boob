@@ -42,6 +42,35 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
+// Función auxiliar para detección de tipo de archivo universal
+func getUniversalFileTypeInfo(fileName, mimeType string) (icon, typeName, ext string) {
+	ext = strings.ToUpper(strings.TrimPrefix(filepath.Ext(fileName), "."))
+	lowerExt := strings.ToLower(ext)
+
+	switch {
+	case strings.Contains(mimeType, "video") || lowerExt == "mp4" || lowerExt == "mkv" || lowerExt == "mov" || lowerExt == "avi" || lowerExt == "flv":
+		return "🎬", "Video", ext
+	case strings.Contains(mimeType, "audio") || lowerExt == "mp3" || lowerExt == "wav" || lowerExt == "flac" || lowerExt == "aac" || lowerExt == "ogg":
+		return "🎵", "Audio", ext
+	case strings.Contains(mimeType, "image") || lowerExt == "png" || lowerExt == "jpg" || lowerExt == "jpeg" || lowerExt == "gif" || lowerExt == "bmp" || lowerExt == "tiff" || lowerExt == "webp":
+		return "🖼️", "Image", ext
+	case lowerExt == "pdf" || lowerExt == "doc" || lowerExt == "docx" || lowerExt == "txt" || lowerExt == "ppt" || lowerExt == "pptx" || lowerExt == "xls" || lowerExt == "xlsx":
+		return "📄", "Document", ext
+	case lowerExt == "zip" || lowerExt == "rar" || lowerExt == "7z" || lowerExt == "tar" || lowerExt == "gz" || lowerExt == "bz2":
+		return "🗂️", "Compressed", ext
+	case lowerExt == "py" || lowerExt == "js" || lowerExt == "go" || lowerExt == "java" || lowerExt == "c" || lowerExt == "cpp" || lowerExt == "cs" || lowerExt == "ts" || lowerExt == "rb" || lowerExt == "php":
+		return "💻", "Code", ext
+	case lowerExt == "exe" || lowerExt == "msi" || lowerExt == "apk" || lowerExt == "bat" || lowerExt == "sh":
+		return "⚙️", "Installer", ext
+	case lowerExt == "ttf" || lowerExt == "otf" || lowerExt == "woff" || lowerExt == "woff2":
+		return "🔤", "Font", ext
+	case lowerExt == "csv" || lowerExt == "json" || lowerExt == "xml" || lowerExt == "db" || lowerExt == "sql":
+		return "🗃️", "Data", ext
+	default:
+		return "🧩", "Other", ext
+	}
+}
+
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -74,9 +103,55 @@ Need help? Contact us at @yoelbots anytime!
 		return dispatcher.EndGroups
 	}
 
+	// Verificación de suscripción al canal (si está configurado)
+	if config.ValueOf.ForceSubChannel != "" {
+		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
+		if err != nil {
+			utils.Logger.Error("Error checking subscription status",
+				zap.Error(err),
+				zap.Int64("userID", chatId),
+				zap.String("channel", config.ValueOf.ForceSubChannel))
+			row := tg.KeyboardButtonRow{
+				Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonURL{
+						Text: "Join Channel",
+						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
+					},
+				},
+			}
+			markup := &tg.ReplyInlineMarkup{
+				Rows: []tg.KeyboardButtonRow{row},
+			}
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
+				Markup: markup,
+			})
+			return dispatcher.EndGroups
+		}
+		if !isSubscribed {
+			row := tg.KeyboardButtonRow{
+				Buttons: []tg.KeyboardButtonClass{
+					&tg.KeyboardButtonURL{
+						Text: "Join Channel",
+						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
+					},
+				},
+			}
+			markup := &tg.ReplyInlineMarkup{
+				Rows: []tg.KeyboardButtonRow{row},
+			}
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
+				Markup: markup,
+			})
+			return dispatcher.EndGroups
+		}
+	}
+
 	// Verificación de media soportada
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
-	if err != nil || !supported {
+	if err != nil {
+		return err
+	}
+	if !supported {
 		ctx.Reply(u, "⚠️ Sorry, this message type is unsupported.", nil)
 		return dispatcher.EndGroups
 	}
@@ -97,12 +172,17 @@ Need help? Contact us at @yoelbots anytime!
 		return dispatcher.EndGroups
 	}
 
+	// Generar hash
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 
 	// Registro de estadísticas
-	if statsCache := cache.GetStatsCache(); statsCache != nil {
-		_ = statsCache.RecordFileProcessed(file.FileSize)
+	statsCache := cache.GetStatsCache()
+	if statsCache != nil {
+		err := statsCache.RecordFileProcessed(file.FileSize)
+		if err != nil {
+			utils.Logger.Error("Failed to record file statistics", zap.Error(err))
+		}
 	}
 
 	// Detección universal de tipo de archivo
@@ -111,22 +191,34 @@ Need help? Contact us at @yoelbots anytime!
 	// Mensaje con nombre, tipo, extensión y tamaño
 	message := fmt.Sprintf("%s %s • %s • %.2f MB\n\n⏳ Link validity is 24 hours", icon, typeName, ext, float64(file.FileSize)/(1024*1024))
 
-	// Botón Stream / Download
-	row := tg.KeyboardButtonRow{
-		Buttons: []tg.KeyboardButtonClass{
-			&tg.KeyboardButtonURL{
-				Text: "Stream / Download",
-				URL:  fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d?hash=%s", messageID, hash),
-			},
-		},
+	// Botón Stream/Download
+	row := tg.KeyboardButtonRow{}
+	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
+		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
+		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
+		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
+			Text: "Stream / Download",
+			URL:  streamURL,
+		})
 	}
-	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-		Markup:           markup,
-		NoWebpage:        false,
-		ReplyToMessageId: u.EffectiveMessage.ID,
-	})
+	markup := &tg.ReplyInlineMarkup{
+		Rows: []tg.KeyboardButtonRow{row},
+	}
+
+	// Enviar respuesta
+	if strings.Contains(config.ValueOf.Host, "http://localhost") {
+		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+			NoWebpage:        false,
+			ReplyToMessageId: u.EffectiveMessage.ID,
+		})
+	} else {
+		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+			Markup:           markup,
+			NoWebpage:        false,
+			ReplyToMessageId: u.EffectiveMessage.ID,
+		})
+	}
 
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
@@ -134,33 +226,4 @@ Need help? Contact us at @yoelbots anytime!
 	}
 
 	return dispatcher.EndGroups
-}
-
-// Función auxiliar para detección de tipo de archivo universal
-func getUniversalFileTypeInfo(fileName, mimeType string) (icon, typeName, ext string) {
-	ext = strings.ToUpper(strings.TrimPrefix(filepath.Ext(fileName), "."))
-	lowerExt := strings.ToLower(ext)
-
-	switch {
-	case strings.Contains(mimeType, "video") || lowerExt == "mp4" || lowerExt == "mkv" || lowerExt == "mov" || lowerExt == "avi" || lowerExt == "flv":
-		return "🎬", "Video", ext
-	case strings.Contains(mimeType, "audio") || lowerExt == "mp3" || lowerExt == "wav" || lowerExt == "flac" || lowerExt == "aac" || lowerExt == "ogg":
-		return "🎵", "Audio", ext
-	case strings.Contains(mimeType, "image") || lowerExt == "png" || lowerExt == "jpg" || lowerExt == "jpeg" || lowerExt == "gif" || lowerExt == "bmp" || lowerExt == "tiff" || lowerExt == "webp":
-		return "🖼️", "Image", ext
-	case lowerExt == "pdf" || lowerExt == "doc" || lowerExt == "docx" || lowerExt == "txt" || lowerExt == "ppt" || lowerExt == "pptx" || lowerExt == "xls" || lowerExt == "xlsx":
-		return "📄", "Document", ext
-	case lowerExt == "zip" || lowerExt == "rar" || lowerExt == "7z" || lowerExt == "tar" || lowerExt == "gz" || lowerExt == "bz2":
-		return "🗂️", "Compressed", ext
-	case lowerExt == "py" || lowerExt == "js" || lowerExt == "go" || lowerExt == "java" || lowerExt == "c" || lowerExt == "cpp" || lowerExt == "cs" || lowerExt == "ts" || lowerExt == "rb" || lowerExt == "php":
-		return "💻", "Code", ext
-	case lowerExt == "exe" || lowerExt == "msi" || lowerExt == "apk" || lowerExt == "bat" || lowerExt == "sh":
-		return "⚙️", "Installer", ext
-	case lowerExt == "ttf" || lowerExt == "otf" || lowerExt == "woff" || lowerExt == "woff2":
-		return "🔤", "Font", ext
-	case lowerExt == "csv" || lowerExt == "json" || lowerExt == "xml" || lowerExt == "db" || lowerExt == "sql":
-		return "🗃️", "Data", ext
-	default:
-		return "🧩", "Other", ext
-	}
 }
