@@ -14,13 +14,10 @@ import (
 	"github.com/celestix/gotgproto/storage"
 	"github.com/celestix/gotgproto/types"
 	"github.com/gotd/td/tg"
-	"go.uber.org/zap"
 )
 
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	log := m.log.Named("start")
-	defer log.Sugar().Info("Loaded")
-
+	defer m.log.Sugar().Info("Loaded")
 	dispatcher.AddHandler(
 		handlers.NewMessage(nil, sendLink),
 	)
@@ -42,8 +39,8 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Devuelve tamaño legible en KB, MB o GB
-func formatFileSize(bytes int) string {
+// Convierte bytes a tamaño legible
+func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
 		MB = 1024 * KB
@@ -59,7 +56,7 @@ func formatFileSize(bytes int) string {
 	}
 }
 
-// Asigna emoji según tipo de archivo
+// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	switch {
 	case strings.Contains(mime, "video"):
@@ -117,7 +114,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
-		utils.Logger.Sugar().Error(err)
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
@@ -130,11 +126,11 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Formato amigable y visual
+	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 	message := fmt.Sprintf(
-		"%s *File Name:* %s\n%s *File Type:* %s\n💾 *Size:* %s\n\n⏳ Link validity: 24 hours",
+		"%s File Name: %s\n%s File Type: %s\n💾 Size: %s\n\n⏳ Link validity is 24 hours",
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
@@ -142,7 +138,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
-	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
 
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
@@ -158,6 +153,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			URL:  streamURL,
 		})
 	}
+
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
@@ -166,7 +162,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
 	if err != nil {
-		utils.Logger.Sugar().Error(err)
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 	}
 
