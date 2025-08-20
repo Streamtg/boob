@@ -26,7 +26,6 @@ func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	)
 }
 
-// Filtrado de media soportada
 func supportedMediaFilter(m *types.Message) (bool, error) {
 	if m.Media == nil {
 		return false, dispatcher.EndGroups
@@ -43,7 +42,6 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Función principal para enviar link de streaming / download
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -110,7 +108,7 @@ Need help? Contact us at @yoelbots anytime!
 	// Detección universal de tipo de archivo
 	icon, typeName, ext := getUniversalFileTypeInfo(file.FileName, file.MimeType)
 
-	// Mensaje profesional con nombre, tipo, extensión y tamaño
+	// Mensaje con nombre, tipo, extensión y tamaño
 	message := fmt.Sprintf("%s %s • %s • %.2f MB\n\n⏳ Link validity is 24 hours", icon, typeName, ext, float64(file.FileSize)/(1024*1024))
 
 	// Botón Stream / Download
@@ -138,7 +136,7 @@ Need help? Contact us at @yoelbots anytime!
 	return dispatcher.EndGroups
 }
 
-// Función auxiliar universal para detección de tipo de archivo
+// Función auxiliar para detección de tipo de archivo universal
 func getUniversalFileTypeInfo(fileName, mimeType string) (icon, typeName, ext string) {
 	ext = strings.ToUpper(strings.TrimPrefix(filepath.Ext(fileName), "."))
 	lowerExt := strings.ToLower(ext)
