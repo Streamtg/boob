@@ -93,13 +93,19 @@ How to start:
 3️⃣ Receive your download & streaming link 🚀
 Need help? Contact us at @yoelbots anytime!
 💡 To see the bot statistics, just type /stats 📊`
-		ctx.Reply(u, welcome, nil)
+		_, err := ctx.Reply(u, welcome, nil)
+		if err != nil {
+			utils.Logger.Sugar().Error(err)
+		}
 		return dispatcher.EndGroups
 	}
 
 	// Check for allowed users
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
-		ctx.Reply(u, "You are not allowed to use this bot.", nil)
+		_, err := ctx.Reply(u, "You are not allowed to use this bot.", nil)
+		if err != nil {
+			utils.Logger.Sugar().Error(err)
+		}
 		return dispatcher.EndGroups
 	}
 
@@ -122,9 +128,10 @@ Need help? Contact us at @yoelbots anytime!
 			markup := &tg.ReplyInlineMarkup{
 				Rows: []tg.KeyboardButtonRow{row},
 			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
+			_, err = ctx.Reply(u, "Please join our channel to get stream links.", markup)
+			if err != nil {
+				utils.Logger.Sugar().Error(err)
+			}
 			return dispatcher.EndGroups
 		}
 		if !isSubscribed {
@@ -139,9 +146,10 @@ Need help? Contact us at @yoelbots anytime!
 			markup := &tg.ReplyInlineMarkup{
 				Rows: []tg.KeyboardButtonRow{row},
 			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
+			_, err = ctx.Reply(u, "Please join our channel to get stream links.", markup)
+			if err != nil {
+				utils.Logger.Sugar().Error(err)
+			}
 			return dispatcher.EndGroups
 		}
 	}
@@ -152,7 +160,10 @@ Need help? Contact us at @yoelbots anytime!
 		return err
 	}
 	if !supported {
-		ctx.Reply(u, "⚠️ Sorry, this message type is unsupported.", nil)
+		_, err := ctx.Reply(u, "⚠️ Sorry, this message type is unsupported.", nil)
+		if err != nil {
+			utils.Logger.Sugar().Error(err)
+		}
 		return dispatcher.EndGroups
 	}
 
@@ -160,7 +171,10 @@ Need help? Contact us at @yoelbots anytime!
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
-		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		_, err = ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		if err != nil {
+			utils.Logger.Sugar().Error(err)
+		}
 		return dispatcher.EndGroups
 	}
 
@@ -168,7 +182,10 @@ Need help? Contact us at @yoelbots anytime!
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		_, err = ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		if err != nil {
+			utils.Logger.Sugar().Error(err)
+		}
 		return dispatcher.EndGroups
 	}
 
@@ -207,22 +224,19 @@ Need help? Contact us at @yoelbots anytime!
 	}
 
 	// Send reply
+	var replyErr error
 	if strings.Contains(config.ValueOf.Host, "http://localhost") {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
+		_, replyErr = ctx.Reply(u, message, nil)
 	} else {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			Markup:           markup,
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
+		_, replyErr = ctx.Reply(u, message, markup, ext.ReplyToMessageID(u.EffectiveMessage.ID))
 	}
 
-	if err != nil {
-		utils.Logger.Sugar().Error(err)
-		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+	if replyErr != nil {
+		utils.Logger.Sugar().Error(replyErr)
+		_, err = ctx.Reply(u, fmt.Sprintf("Error - %s", replyErr.Error()), nil)
+		if err != nil {
+			utils.Logger.Sugar().Error(err)
+		}
 	}
 
 	return dispatcher.EndGroups
