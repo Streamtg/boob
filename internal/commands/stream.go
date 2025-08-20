@@ -17,6 +17,25 @@ import (
 	"go.uber.org/zap"
 )
 
+// --- Función auxiliar para convertir bytes en MB/GB ---
+func humanFileSize(size int64) string {
+	const (
+		KB = 1 << (10 * 1)
+		MB = 1 << (10 * 2)
+		GB = 1 << (10 * 3)
+	)
+	switch {
+	case size >= GB:
+		return fmt.Sprintf("%.2f GB", float64(size)/GB)
+	case size >= MB:
+		return fmt.Sprintf("%.2f MB", float64(size)/MB)
+	case size >= KB:
+		return fmt.Sprintf("%.2f KB", float64(size)/KB)
+	default:
+		return fmt.Sprintf("%d B", size)
+	}
+}
+
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	log := m.log.Named("start")
 	defer log.Sugar().Info("Loaded")
@@ -67,12 +86,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 					},
 				},
 			}
-			markup := &tg.ReplyInlineMarkup{
-				Rows: []tg.KeyboardButtonRow{row},
-			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
+			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{Markup: markup})
 			return dispatcher.EndGroups
 		}
 		if !isSubscribed {
@@ -84,12 +99,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 					},
 				},
 			}
-			markup := &tg.ReplyInlineMarkup{
-				Rows: []tg.KeyboardButtonRow{row},
-			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
+			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{Markup: markup})
 			return dispatcher.EndGroups
 		}
 	}
@@ -118,30 +129,26 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	fullHash := utils.PackFile(
-		file.FileName,
-		file.FileSize,
-		file.MimeType,
-		file.ID,
-	)
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
-
 	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
 
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
-		err := statsCache.RecordFileProcessed(file.FileSize)
-		if err != nil {
-			utils.Logger.Error("Failed to record file statistics", zap.Error(err))
-		}
+		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Mensaje sin enlace de descarga ni botón Download
-	message := fmt.Sprintf("📄 File Name: %s\n\n⏳ Link validity is 24 hours", file.FileName)
+	// --- Nuevo mensaje con Nombre, Tamaño y Tipo ---
+	message := fmt.Sprintf(
+		"📄 File Name: %s\n📦 File Size: %s\n📑 File Type: %s\n\n⏳ Link validity is 24 hours",
+		file.FileName,
+		humanFileSize(file.FileSize),
+		file.MimeType,
+	)
 
 	row := tg.KeyboardButtonRow{}
 
-	// Botón Stream/Download apunta al Worker, para videos y archivos binarios
+	// Botón Stream/Download apunta al Worker
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
@@ -151,21 +158,12 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		})
 	}
 
-	markup := &tg.ReplyInlineMarkup{
-		Rows: []tg.KeyboardButtonRow{row},
-	}
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	if strings.Contains(link, "http://localhost") {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
+		_, err = ctx.Reply(u, message, &ext.ReplyOpts{ReplyToMessageId: u.EffectiveMessage.ID})
 	} else {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			Markup:           markup,
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
+		_, err = ctx.Reply(u, message, &ext.ReplyOpts{Markup: markup, ReplyToMessageId: u.EffectiveMessage.ID})
 	}
 
 	if err != nil {
