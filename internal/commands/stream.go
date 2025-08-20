@@ -128,7 +128,10 @@ Need help? Contact us at @yoelbots anytime!
 			markup := &tg.ReplyInlineMarkup{
 				Rows: []tg.KeyboardButtonRow{row},
 			}
-			_, err = ctx.Reply(u, "Please join our channel to get stream links.", markup)
+			_, err = ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
+				Markup:           markup,
+				ReplyToMessageID: u.EffectiveMessage.ID,
+			})
 			if err != nil {
 				utils.Logger.Sugar().Error(err)
 			}
@@ -146,7 +149,10 @@ Need help? Contact us at @yoelbots anytime!
 			markup := &tg.ReplyInlineMarkup{
 				Rows: []tg.KeyboardButtonRow{row},
 			}
-			_, err = ctx.Reply(u, "Please join our channel to get stream links.", markup)
+			_, err = ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
+				Markup:           markup,
+				ReplyToMessageID: u.EffectiveMessage.ID,
+			})
 			if err != nil {
 				utils.Logger.Sugar().Error(err)
 			}
@@ -226,9 +232,14 @@ Need help? Contact us at @yoelbots anytime!
 	// Send reply
 	var replyErr error
 	if strings.Contains(config.ValueOf.Host, "http://localhost") {
-		_, replyErr = ctx.Reply(u, message, nil)
+		_, replyErr = ctx.Reply(u, message, &ext.ReplyOpts{
+			ReplyToMessageID: u.EffectiveMessage.ID,
+		})
 	} else {
-		_, replyErr = ctx.Reply(u, message, markup, ext.ReplyToMessageID(u.EffectiveMessage.ID))
+		_, replyErr = ctx.Reply(u, message, &ext.ReplyOpts{
+			Markup:           markup,
+			ReplyToMessageID: u.EffectiveMessage.ID,
+		})
 	}
 
 	if replyErr != nil {
