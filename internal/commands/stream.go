@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// humanFileSize formats bytes into KB, MB, GB
+// humanFileSize formats bytes to KB, MB or GB
 func humanFileSize(size int64) string {
 	const (
 		KB = 1 << (10 * 1)
@@ -33,24 +33,6 @@ func humanFileSize(size int64) string {
 		return fmt.Sprintf("%.2f KB", float64(size)/KB)
 	default:
 		return fmt.Sprintf("%d B", size)
-	}
-}
-
-// friendlyFileType returns a human-friendly label with emoji
-func friendlyFileType(mime string) string {
-	switch {
-	case strings.Contains(mime, "video"):
-		return "🎬 Video"
-	case strings.Contains(mime, "image"):
-		return "🖼️ Image"
-	case strings.Contains(mime, "audio"):
-		return "🎵 Audio"
-	case strings.Contains(mime, "pdf"):
-		return "📄 PDF Document"
-	case strings.Contains(mime, "zip"), strings.Contains(mime, "rar"), strings.Contains(mime, "tar"):
-		return "📦 Archive"
-	default:
-		return "📁 File"
 	}
 }
 
@@ -139,12 +121,12 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Build message with friendly file type
+	// Build message with name, size, and type
 	message := fmt.Sprintf(
 		"📄 File Name: %s\n📦 File Size: %s\n📝 File Type: %s",
 		file.FileName,
 		humanFileSize(file.FileSize),
-		friendlyFileType(file.MimeType),
+		file.MimeType,
 	)
 
 	// Build streaming button
