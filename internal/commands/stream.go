@@ -102,7 +102,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	// Mensaje con nombre, tipo y tamaño del archivo
 	sizeMB := float64(file.FileSize) / (1024 * 1024)
 	message := fmt.Sprintf(
-		"📄 File Name: %s\n🗂 File Type: %s\n💾 Size: %.2f MB\n\n⏳ Link validity is 24 hours",
+		"📄 File Name: %s\n🗂 File Type: %s\n💾 Size: %.2f MB\n\n @yoelbots",
 		file.FileName,
 		file.MimeType,
 		sizeMB,
