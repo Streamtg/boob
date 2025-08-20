@@ -42,7 +42,7 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Función auxiliar para detección de tipo de archivo universal
+// Universal file type detection function
 func getUniversalFileTypeInfo(fileName, mimeType string) (icon, typeName, ext string) {
 	ext = strings.ToUpper(strings.TrimPrefix(filepath.Ext(fileName), "."))
 	lowerExt := strings.ToLower(ext)
@@ -78,7 +78,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje de bienvenida al /start
+	// Welcome message for /start command
 	if u.EffectiveMessage.Text != "" && strings.HasPrefix(u.EffectiveMessage.Text, "/start") {
 		welcome := `Hey there! 👋 I’m your personal file streaming assistant.
 Send me any file yes, any format 📂 and I’ll turn it into a direct download link or streaming link instantly! ⚡
@@ -97,13 +97,13 @@ Need help? Contact us at @yoelbots anytime!
 		return dispatcher.EndGroups
 	}
 
-	// Validación de usuarios permitidos
+	// Check for allowed users
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
-	// Verificación de suscripción al canal (si está configurado)
+	// Check for forced channel subscription
 	if config.ValueOf.ForceSubChannel != "" {
 		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
 		if err != nil {
@@ -146,7 +146,7 @@ Need help? Contact us at @yoelbots anytime!
 		}
 	}
 
-	// Verificación de media soportada
+	// Check for supported media
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil {
 		return err
@@ -156,7 +156,7 @@ Need help? Contact us at @yoelbots anytime!
 		return dispatcher.EndGroups
 	}
 
-	// Reenvío al canal de logs
+	// Forward message to log channel
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
@@ -172,11 +172,11 @@ Need help? Contact us at @yoelbots anytime!
 		return dispatcher.EndGroups
 	}
 
-	// Generar hash
+	// Generate hash
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 
-	// Registro de estadísticas
+	// Record file statistics
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
 		err := statsCache.RecordFileProcessed(file.FileSize)
@@ -185,13 +185,13 @@ Need help? Contact us at @yoelbots anytime!
 		}
 	}
 
-	// Detección universal de tipo de archivo
+	// Get file type information
 	icon, typeName, ext := getUniversalFileTypeInfo(file.FileName, file.MimeType)
 
-	// Mensaje con nombre, tipo, extensión y tamaño
+	// Create response message with file details
 	message := fmt.Sprintf("%s %s • %s • %.2f MB\n\n⏳ Link validity is 24 hours", icon, typeName, ext, float64(file.FileSize)/(1024*1024))
 
-	// Botón Stream/Download
+	// Create Stream/Download button for videos or binary files
 	row := tg.KeyboardButtonRow{}
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
@@ -206,7 +206,7 @@ Need help? Contact us at @yoelbots anytime!
 		Rows: []tg.KeyboardButtonRow{row},
 	}
 
-	// Enviar respuesta
+	// Send reply
 	if strings.Contains(config.ValueOf.Host, "http://localhost") {
 		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 			NoWebpage:        false,
