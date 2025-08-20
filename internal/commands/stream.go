@@ -1,7 +1,6 @@
-package commands
-
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"EverythingSuckz/fsb/config"
@@ -17,27 +16,32 @@ import (
 	"go.uber.org/zap"
 )
 
-func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	log := m.log.Named("start")
-	defer log.Sugar().Info("Loaded")
-	dispatcher.AddHandler(
-		handlers.NewMessage(nil, sendLink),
-	)
-}
+// Función universal para detectar tipo y icono según extensión y MIME
+func getUniversalFileTypeInfo(fileName, mimeType string) (icon, typeName, ext string) {
+	ext = strings.ToUpper(strings.TrimPrefix(filepath.Ext(fileName), "."))
+	lowerExt := strings.ToLower(ext)
 
-func supportedMediaFilter(m *types.Message) (bool, error) {
-	if not := m.Media == nil; not {
-		return false, dispatcher.EndGroups
-	}
-	switch m.Media.(type) {
-	case *tg.MessageMediaDocument:
-		return true, nil
-	case *tg.MessageMediaPhoto:
-		return true, nil
-	case tg.MessageMediaClass:
-		return false, dispatcher.EndGroups
+	switch {
+	case strings.Contains(mimeType, "video") || lowerExt == "mp4" || lowerExt == "mkv" || lowerExt == "mov" || lowerExt == "avi" || lowerExt == "flv":
+		return "🎬", "Video", ext
+	case strings.Contains(mimeType, "audio") || lowerExt == "mp3" || lowerExt == "wav" || lowerExt == "flac" || lowerExt == "aac" || lowerExt == "ogg":
+		return "🎵", "Audio", ext
+	case strings.Contains(mimeType, "image") || lowerExt == "png" || lowerExt == "jpg" || lowerExt == "jpeg" || lowerExt == "gif" || lowerExt == "bmp" || lowerExt == "tiff" || lowerExt == "webp":
+		return "🖼️", "Image", ext
+	case lowerExt == "pdf" || lowerExt == "doc" || lowerExt == "docx" || lowerExt == "txt" || lowerExt == "ppt" || lowerExt == "pptx" || lowerExt == "xls" || lowerExt == "xlsx":
+		return "📄", "Document", ext
+	case lowerExt == "zip" || lowerExt == "rar" || lowerExt == "7z" || lowerExt == "tar" || lowerExt == "gz" || lowerExt == "bz2":
+		return "🗂️", "Compressed", ext
+	case lowerExt == "py" || lowerExt == "js" || lowerExt == "go" || lowerExt == "java" || lowerExt == "c" || lowerExt == "cpp" || lowerExt == "cs" || lowerExt == "ts" || lowerExt == "rb" || lowerExt == "php":
+		return "💻", "Code", ext
+	case lowerExt == "exe" || lowerExt == "msi" || lowerExt == "apk" || lowerExt == "bat" || lowerExt == "sh":
+		return "⚙️", "Installer", ext
+	case lowerExt == "ttf" || lowerExt == "otf" || lowerExt == "woff" || lowerExt == "woff2":
+		return "🔤", "Font", ext
+	case lowerExt == "csv" || lowerExt == "json" || lowerExt == "xml" || lowerExt == "db" || lowerExt == "sql":
+		return "🗃️", "Data", ext
 	default:
-		return false, nil
+		return "🧩", "Other", ext
 	}
 }
 
@@ -47,62 +51,39 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	if peerChatId.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
+
+	// Mensaje de bienvenida
+	if u.EffectiveMessage.Text != "" && strings.HasPrefix(u.EffectiveMessage.Text, "/start") {
+		welcome := `Hey there! 👋 I’m your personal file streaming assistant.
+Send me any file yes, any format 📂 and I’ll turn it into a direct download link or streaming link instantly! ⚡
+What you can do:
+✅ Upload files of any type
+✅ Get a direct download link instantly
+✅ Stream your media without hassle
+✅ Share links with friends easily
+How to start:
+1️⃣ Send me a file
+2️⃣ Wait a few seconds ⏱️
+3️⃣ Receive your download & streaming link 🚀
+Need help? Contact us at @yoelbots anytime!
+💡 To see the bot statistics, just type /stats 📊`
+		ctx.Reply(u, welcome, nil)
+		return dispatcher.EndGroups
+	}
+
+	// Validación de usuarios permitidos
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
-	if config.ValueOf.ForceSubChannel != "" {
-		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
-		if err != nil {
-			utils.Logger.Error("Error checking subscription status",
-				zap.Error(err),
-				zap.Int64("userID", chatId),
-				zap.String("channel", config.ValueOf.ForceSubChannel))
-			row := tg.KeyboardButtonRow{
-				Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonURL{
-						Text: "Join Channel",
-						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
-					},
-				},
-			}
-			markup := &tg.ReplyInlineMarkup{
-				Rows: []tg.KeyboardButtonRow{row},
-			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
-			return dispatcher.EndGroups
-		}
-		if !isSubscribed {
-			row := tg.KeyboardButtonRow{
-				Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonURL{
-						Text: "Join Channel",
-						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
-					},
-				},
-			}
-			markup := &tg.ReplyInlineMarkup{
-				Rows: []tg.KeyboardButtonRow{row},
-			}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
-			return dispatcher.EndGroups
-		}
-	}
-
-	supported, err := supportedMediaFilter(u.EffectiveMessage)
-	if err != nil {
-		return err
-	}
-	if !supported {
-		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
+	// Verificación de media
+	if u.EffectiveMessage.Media == nil {
+		ctx.Reply(u, "⚠️ Sorry, this message does not contain a file.", nil)
 		return dispatcher.EndGroups
 	}
 
+	// Reenvío al canal de logs
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
@@ -118,55 +99,36 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	fullHash := utils.PackFile(
-		file.FileName,
-		file.FileSize,
-		file.MimeType,
-		file.ID,
-	)
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 
-	link := fmt.Sprintf("%s/stream/%d?hash=%s", config.ValueOf.Host, messageID, hash)
-
-	statsCache := cache.GetStatsCache()
-	if statsCache != nil {
-		err := statsCache.RecordFileProcessed(file.FileSize)
-		if err != nil {
-			utils.Logger.Error("Failed to record file statistics", zap.Error(err))
-		}
+	// Registro de estadísticas
+	if statsCache := cache.GetStatsCache(); statsCache != nil {
+		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Mensaje sin enlace de descarga ni botón Download
-	message := fmt.Sprintf("📄 File Name: %s\n\n⏳ Link validity is 24 hours", file.FileName)
+	// Detectar tipo de archivo universal
+	icon, typeName, ext := getUniversalFileTypeInfo(file.FileName, file.MimeType)
 
-	row := tg.KeyboardButtonRow{}
+	// Mensaje profesional
+	message := fmt.Sprintf("%s %s • %s • %.2f MB\n\n⏳ Link validity is 24 hours", icon, typeName, ext, float64(file.FileSize)/(1024*1024))
 
-	// Botón Stream/Download apunta al Worker, para videos y archivos binarios
-	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
-		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
-		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
-		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
-			Text: "Stream / Download",
-			URL:  streamURL,
-		})
+	// Botón Stream/Download
+	row := tg.KeyboardButtonRow{
+		Buttons: []tg.KeyboardButtonClass{
+			&tg.KeyboardButtonURL{
+				Text: "Stream / Download",
+				URL:  fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d?hash=%s", messageID, hash),
+			},
+		},
 	}
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	markup := &tg.ReplyInlineMarkup{
-		Rows: []tg.KeyboardButtonRow{row},
-	}
-
-	if strings.Contains(link, "http://localhost") {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
-	} else {
-		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-			Markup:           markup,
-			NoWebpage:        false,
-			ReplyToMessageId: u.EffectiveMessage.ID,
-		})
-	}
+	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+		Markup:           markup,
+		NoWebpage:        false,
+		ReplyToMessageId: u.EffectiveMessage.ID,
+	})
 
 	if err != nil {
 		utils.Logger.Sugar().Error(err)
