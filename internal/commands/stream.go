@@ -1,9 +1,6 @@
-package commands
-
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"EverythingSuckz/fsb/config"
 	"EverythingSuckz/fsb/internal/cache"
@@ -40,11 +37,12 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
+// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
-		MB = 4 * KB
-		GB = 4 * MB
+		MB = 1024 * KB
+		GB = 1024 * MB
 	)
 	switch {
 	case bytes >= GB:
@@ -56,6 +54,7 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
+// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	switch {
 	case strings.Contains(mime, "video"):
@@ -92,7 +91,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
 						Text: "Join Channel",
-						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
+						URL:  fmt.Sprintf("https://t.me/%s  ", config.ValueOf.ForceSubChannel),
 					},
 				},
 			}
@@ -125,18 +124,37 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// fallback simple si Telegram no mandó nombre
-	fileName := file.FileName
-	if fileName == "" {
-		fileName = fmt.Sprintf("file_%d", time.Now().Unix())
+	// Detectar nombre y formato si no está presente (por ejemplo, en fotos)
+	if file.FileName == "" {
+		var ext string
+		lowerMime := strings.ToLower(file.MimeType)
+		switch {
+		case strings.Contains(lowerMime, "image/jpeg"):
+			ext = ".jpg"
+			file.FileName = "photo" + ext
+		case strings.Contains(lowerMime, "image/png"):
+			ext = ".png"
+			file.FileName = "photo" + ext
+		case strings.Contains(lowerMime, "image/gif"):
+			ext = ".gif"
+			file.FileName = "animation" + ext
+		case strings.Contains(lowerMime, "video"):
+			ext = ".mp4"
+			file.FileName = "video" + ext
+		case strings.Contains(lowerMime, "audio"):
+			ext = ".mp3"
+			file.FileName = "audio" + ext
+		default:
+			file.FileName = "unknown"
+		}
 	}
 
+	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
-
 	message := fmt.Sprintf(
 		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
-		emoji, fileName,
+		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
 	)
@@ -152,7 +170,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	row := tg.KeyboardButtonRow{}
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
-		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
+		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s  ", videoParam)
 		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 			Text: "Stream / Download",
 			URL:  streamURL,
