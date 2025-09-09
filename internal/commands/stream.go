@@ -1,3 +1,5 @@
+package commands
+
 import (
 	"fmt"
 	"strings"
