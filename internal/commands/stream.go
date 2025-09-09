@@ -59,17 +59,22 @@ func formatFileSize(bytes int64) string {
 
 // Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
+	lowerMime := strings.ToLower(mime)
 	switch {
-	case strings.Contains(mime, "video"):
+	case strings.Contains(lowerMime, "video"):
 		return "🎬"
-	case strings.Contains(mime, "image"):
+	case strings.Contains(lowerMime, "image"):
 		return "🖼️"
-	case strings.Contains(mime, "audio"):
+	case strings.Contains(lowerMime, "audio"):
 		return "🎵"
-	case strings.Contains(mime, "pdf"):
+	case strings.Contains(lowerMime, "pdf"):
 		return "📕"
-	case strings.Contains(mime, "zip"), strings.Contains(mime, "rar"):
+	case strings.Contains(lowerMime, "zip"), strings.Contains(lowerMime, "rar"):
 		return "🗜️"
+	case strings.Contains(lowerMime, "text"):
+		return "📝"
+	case strings.Contains(lowerMime, "application"):
+		return "📄"
 	default:
 		return "📄"
 	}
@@ -127,7 +132,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Detectar nombre y formato si no está presente (por ejemplo, en fotos)
+	// Detectar nombre y formato si no está presente
 	if file.FileName == "" {
 		var ext string
 		lowerMime := strings.ToLower(file.MimeType)
@@ -147,7 +152,23 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		case strings.Contains(lowerMime, "audio"):
 			ext = ".mp3"
 			file.FileName = "audio" + ext
+		case strings.Contains(lowerMime, "pdf"):
+			ext = ".pdf"
+			file.FileName = "document" + ext
+		case strings.Contains(lowerMime, "zip"):
+			ext = ".zip"
+			file.FileName = "archive" + ext
+		case strings.Contains(lowerMime, "rar"):
+			ext = ".rar"
+			file.FileName = "archive" + ext
+		case strings.Contains(lowerMime, "text"):
+			ext = ".txt"
+			file.FileName = "text" + ext
+		case strings.Contains(lowerMime, "application"):
+			ext = ".bin"
+			file.FileName = "file" + ext
 		default:
+			ext = ""
 			file.FileName = "unknown"
 		}
 	}
@@ -172,16 +193,15 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	var markup *tg.ReplyInlineMarkup
 	row := tg.KeyboardButtonRow{}
-	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
-		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
-		encodedFilename := url.QueryEscape(file.FileName)
-		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", videoParam, encodedFilename)
-		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
-			Text: "Stream / Download",
-			URL:  streamURL,
-		})
-		markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-	}
+	// Generar botón para todos los tipos de archivo soportados
+	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
+	encodedFilename := url.QueryEscape(file.FileName)
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", videoParam, encodedFilename)
+	row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
+		Text: "Stream / Download",
+		URL:  streamURL,
+	})
+	markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
