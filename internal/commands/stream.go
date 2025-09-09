@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"EverythingSuckz/fsb/internal/utils"
 
 	"github.com/celestix/gotgproto/dispatcher"
+	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/storage"
 	"github.com/celestix/gotgproto/types"
@@ -43,8 +43,8 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
-		MB = 1024 * KB
-		GB = 1024 * MB
+		MB = 4 * KB
+		GB = 4 * MB
 	)
 	switch {
 	case bytes >= GB:
@@ -71,30 +71,6 @@ func fileTypeEmoji(mime string) string {
 	default:
 		return "📄"
 	}
-}
-
-func getTelegramFileName(file *utils.File) string {
-	if file.FileName != "" {
-		return file.FileName
-	}
-
-	ext := "bin"
-	if file.MimeType != "" {
-		switch {
-		case strings.Contains(file.MimeType, "image"):
-			ext = "jpg"
-		case strings.Contains(file.MimeType, "video"):
-			ext = "mp4"
-		case strings.Contains(file.MimeType, "audio"):
-			ext = "mp3"
-		case strings.Contains(file.MimeType, "pdf"):
-			ext = "pdf"
-		case strings.Contains(file.MimeType, "zip"):
-			ext = "zip"
-		}
-	}
-
-	return fmt.Sprintf("file_%d.%s", time.Now().Unix(), ext)
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
@@ -149,7 +125,12 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	fileName := getTelegramFileName(file)
+	// fallback simple si Telegram no mandó nombre
+	fileName := file.FileName
+	if fileName == "" {
+		fileName = fmt.Sprintf("file_%d", time.Now().Unix())
+	}
+
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 
