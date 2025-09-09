@@ -1,3 +1,5 @@
+package commands
+
 import (
 	"fmt"
 	"path/filepath"
@@ -14,6 +16,62 @@ import (
 	"github.com/celestix/gotgproto/types"
 	"github.com/gotd/td/tg"
 )
+
+func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
+	defer m.log.Sugar().Info("Loaded")
+	dispatcher.AddHandler(
+		handlers.NewMessage(nil, sendLink),
+	)
+}
+
+func supportedMediaFilter(m *types.Message) (bool, error) {
+	if m.Media == nil {
+		return false, dispatcher.EndGroups
+	}
+	switch m.Media.(type) {
+	case *tg.MessageMediaDocument:
+		return true, nil
+	case *tg.MessageMediaPhoto:
+		return true, nil
+	case tg.MessageMediaClass:
+		return false, dispatcher.EndGroups
+	default:
+		return false, nil
+	}
+}
+
+func formatFileSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
+	default:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
+	}
+}
+
+func fileTypeEmoji(mime string) string {
+	switch {
+	case strings.Contains(mime, "video"):
+		return "🎬"
+	case strings.Contains(mime, "image"):
+		return "🖼️"
+	case strings.Contains(mime, "audio"):
+		return "🎵"
+	case strings.Contains(mime, "pdf"):
+		return "📕"
+	case strings.Contains(mime, "zip"), strings.Contains(mime, "rar"):
+		return "🗜️"
+	default:
+		return "📄"
+	}
+}
 
 func getTelegramFileName(file *utils.File) string {
 	if file.FileName != "" {
