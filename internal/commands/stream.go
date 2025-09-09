@@ -93,7 +93,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
 						Text: "Join Channel",
-						URL:  fmt.Sprintf("https://t.me/%s  ", config.ValueOf.ForceSubChannel),
+						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
 					},
 				},
 			}
@@ -169,23 +169,20 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
+	var markup *tg.ReplyInlineMarkup
 	row := tg.KeyboardButtonRow{}
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
-		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s  ", videoParam)
+		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
 		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 			Text: "Stream / Download",
 			URL:  streamURL,
 		})
-	}
-
-	var markup *tg.ReplyInlineMarkup
-	if len(row.Buttons) > 0 {
 		markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 	}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-		Markup:           markup,
+		Markup:           markup, // Only set if row.Buttons is not empty
 		NoWebpage:        false,
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
