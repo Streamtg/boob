@@ -126,31 +126,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Detectar nombre y formato si no está presente (por ejemplo, en fotos)
-	if file.FileName == "" {
-		var ext string
-		lowerMime := strings.ToLower(file.MimeType)
-		switch {
-		case strings.Contains(lowerMime, "image/jpeg"):
-			ext = ".jpg"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/png"):
-			ext = ".png"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/gif"):
-			ext = ".gif"
-			file.FileName = "animation" + ext
-		case strings.Contains(lowerMime, "video"):
-			ext = ".mp4"
-			file.FileName = "video" + ext
-		case strings.Contains(lowerMime, "audio"):
-			ext = ".mp3"
-			file.FileName = "audio" + ext
-		default:
-			file.FileName = "unknown"
-		}
-	}
-
 	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
@@ -169,7 +144,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	var markup *tg.ReplyInlineMarkup
 	row := tg.KeyboardButtonRow{}
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
@@ -178,11 +152,12 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			Text: "Stream / Download",
 			URL:  streamURL,
 		})
-		markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 	}
 
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-		Markup:           markup, // Only set if row.Buttons is not empty
+		Markup:           markup,
 		NoWebpage:        false,
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
