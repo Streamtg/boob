@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"EverythingSuckz/fsb/config"
 	"EverythingSuckz/fsb/internal/cache"
@@ -39,12 +40,11 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
-		MB = 1024 * KB
-		GB = 1024 * MB
+		MB = 4 * KB
+		GB = 4 * MB
 	)
 	switch {
 	case bytes >= GB:
@@ -56,7 +56,6 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	switch {
 	case strings.Contains(mime, "video"):
@@ -126,12 +125,18 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje visual con emoji, tipo y tamaño
+	// fallback simple si Telegram no mandó nombre
+	fileName := file.FileName
+	if fileName == "" {
+		fileName = fmt.Sprintf("file_%d", time.Now().Unix())
+	}
+
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
+
 	message := fmt.Sprintf(
 		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
-		emoji, file.FileName,
+		emoji, fileName,
 		emoji, file.MimeType,
 		size,
 	)
