@@ -179,7 +179,10 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		})
 	}
 
-	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+	var markup *tg.ReplyInlineMarkup
+	if len(row.Buttons) > 0 {
+		markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+	}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
