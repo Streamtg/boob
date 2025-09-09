@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"EverythingSuckz/fsb/config"
@@ -173,7 +174,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	row := tg.KeyboardButtonRow{}
 	if strings.Contains(file.MimeType, "video") || strings.Contains(file.MimeType, "application/octet-stream") {
 		videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
-		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s", videoParam)
+		encodedFilename := url.QueryEscape(file.FileName)
+		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", videoParam, encodedFilename)
 		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 			Text: "Stream / Download",
 			URL:  streamURL,
@@ -182,7 +184,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-		Markup:           markup, // Only set if row.Buttons is not empty
+		Markup:           markup,
 		NoWebpage:        false,
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
