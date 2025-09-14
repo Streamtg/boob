@@ -195,8 +195,9 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	row := tg.KeyboardButtonRow{}
 	// Generar botón para todos los tipos de archivo soportados
 	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
+	encodedVideoParam := url.QueryEscape(videoParam) // Escapar para evitar query string malformado
 	encodedFilename := url.QueryEscape(file.FileName)
-	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", videoParam, encodedFilename)
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
 	row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 		Text: "Stream / Download",
 		URL:  streamURL,
