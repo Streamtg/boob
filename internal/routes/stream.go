@@ -27,8 +27,8 @@ func (e *allRoutes) LoadHome(r *Route) {
 }
 
 func getStreamRoute(ctx *gin.Context) {
-	// Agregar timeout para streaming de archivos grandes
-	c, cancel := context.WithTimeout(ctx.Request.Context(), 300*time.Second)
+	// Timeout aumentado a 600 segundos para archivos grandes
+	c, cancel := context.WithTimeout(ctx.Request.Context(), 600*time.Second)
 	defer cancel()
 
 	w := ctx.Writer
@@ -57,7 +57,7 @@ func getStreamRoute(ctx *gin.Context) {
 		return
 	}
 
-	// Sincronizar lógica de nombre de archivo por defecto con commands/stream.go
+	// Sincronizar lógica de nombre de archivo por defecto
 	if file.FileName == "" {
 		file.FileName = generateDefaultFilename(file.MimeType)
 	}
@@ -65,7 +65,13 @@ func getStreamRoute(ctx *gin.Context) {
 	// Validar hash
 	expectedHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	if !utils.CheckHash(authHash, expectedHash) {
-		log.Error("Invalid hash", zap.String("received", authHash), zap.String("expected", utils.GetShortHash(expectedHash)))
+		log.Error("Invalid hash",
+			zap.String("received", authHash),
+			zap.String("expected", utils.GetShortHash(expectedHash)),
+			zap.String("fileName", file.FileName),
+			zap.Int64("fileSize", file.FileSize),
+			zap.String("mimeType", file.MimeType),
+			zap.Int64("fileID", file.ID))
 		http.Error(w, "Invalid hash", http.StatusBadRequest)
 		return
 	}
@@ -145,10 +151,15 @@ func getStreamRoute(ctx *gin.Context) {
 		defer lr.Close()
 
 		_, err = io.CopyN(w, lr, end-start+1)
-		if err != nil && (err == io.ErrUnexpectedEOF || strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "connection reset by peer")) {
-			log.Warn("Client disconnected during stream", zap.Error(err))
-			return
-		} else if err != nil {
+		if err != nil {
+			if err == io.ErrUnexpectedEOF ||
+				strings.Contains(err.Error(), "broken pipe") ||
+				strings.Contains(err.Error(), "connection reset by peer") ||
+				strings.Contains(err.Error(), "context canceled") ||
+				strings.Contains(err.Error(), "context deadline exceeded") {
+				log.Warn("Client disconnected or Telegram context issue", zap.Error(err))
+				return
+			}
 			log.Error("Error while copying stream", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
