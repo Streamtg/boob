@@ -177,7 +177,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 	message := fmt.Sprintf(
-		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n📩Please follow my channel @yoelbots %s\n\n🩸collaborate to keep the bot running https://www.paypal.me/Yoel1095 ",
+		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n📩Official channel @yoelbots %s\n\n🩸Please collaborate to keep the bot running https://www.paypal.me/Yoel1095 ",
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
