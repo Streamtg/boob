@@ -177,7 +177,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 	message := fmt.Sprintf(
-		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
+		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n📩Please follow my channel @yoelbots %s\n\n🩸collaborate to keep the bot running https://www.paypal.me/Yoel1095 ",
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
@@ -199,7 +199,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	encodedFilename := url.QueryEscape(file.FileName)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
 	row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
-		Text: "Stream / Download",
+		Text: "Streaming / Download",
 		URL:  streamURL,
 	})
 	markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
