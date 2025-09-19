@@ -2,13 +2,13 @@ package main
 
 import (
 	"EverythingSuckz/fsb/config"
-	"EverythingSuckz/fsb/internal/commands" // Importa el paquete de comandos
+	"EverythingSuckz/fsb/internal/commands"
 	"fmt"
 	"os"
 
 	"github.com/celestix/gotgproto"
-	"github.com/celestix/gotgproto/dispatcher"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 const versionString = "3.1.0"
@@ -30,9 +30,17 @@ var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run the Telegram File Stream Bot",
 	Run: func(cmd *cobra.Command, args []string) {
-		// Inicializar configuración desde fsb.env
+		// Inicializar logger
+		logger, err := zap.NewProduction()
+		if err != nil {
+			fmt.Printf("Error iniciando logger: %v\n", err)
+			os.Exit(1)
+		}
+		defer logger.Sync()
+
+		// Cargar configuración desde fsb.env
 		if err := config.ValueOf.LoadConfig(); err != nil {
-			fmt.Printf("Error cargando configuración: %v\n", err)
+			logger.Fatal("Error cargando configuración", zap.Error(err))
 			os.Exit(1)
 		}
 
@@ -44,13 +52,13 @@ var runCmd = &cobra.Command{
 			&gotgproto.ClientOpts{},
 		)
 		if err != nil {
-			fmt.Printf("Error iniciando cliente de Telegram: %v\n", err)
+			logger.Fatal("Error iniciando cliente de Telegram", zap.Error(err))
 			os.Exit(1)
 		}
 
-		// Crear instancia de comandos (ajusta el logger según tu implementación)
+		// Crear instancia de comandos con el logger
 		cmdInstance := &commands.Command{
-			Log: yourLogger, // Reemplaza con tu logger (puede ser zerolog, logrus, etc.)
+			Log: logger,
 		}
 
 		// Cargar el handler de streaming
@@ -58,9 +66,9 @@ var runCmd = &cobra.Command{
 		cmdInstance.LoadStream(dispatcher)
 
 		// Iniciar el cliente
-		fmt.Println("Bot iniciado correctamente")
+		logger.Info("Bot iniciado correctamente")
 		if err := client.Run(); err != nil {
-			fmt.Printf("Error ejecutando el bot: %v\n", err)
+			logger.Fatal("Error ejecutando el bot", zap.Error(err))
 			os.Exit(1)
 		}
 	},
@@ -70,7 +78,6 @@ var sessionCmd = &cobra.Command{
 	Use:   "session",
 	Short: "Generate a session string for the user account",
 	Run: func(cmd *cobra.Command, args []string) {
-		// Implementación existente de sessionCmd (no proporcionada, mantener como está)
 		fmt.Println("Generando sesión... (implementación no modificada)")
 	},
 }
