@@ -10,6 +10,9 @@ import (
 	"strings"
 
 	"EverythingSuckz/fsb/config"
+	"EverythingSuckz/fsb/internal/cache"
+	"EverythingSuckz/fsb/internal/utils"
+
 	"github.com/celestix/gotgproto/dispatcher"
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/ext"
@@ -41,6 +44,7 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
+// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -57,6 +61,7 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
+// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -81,28 +86,19 @@ func fileTypeEmoji(mime string) string {
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatID := u.EffectiveChat().GetID()
-	peerChat := ctx.PeerStorage.GetPeerById(chatID)
-	if peerChat.Type != int(storage.TypeUser) {
+	peer := ctx.PeerStorage.GetPeerById(chatID)
+	if peer.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
 
-	if len(config.ValueOf.AllowedUsers) > 0 {
-		allowed := false
-		for _, id := range config.ValueOf.AllowedUsers {
-			if id == chatID {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			ctx.Reply(u, "You are not allowed to use this bot.", nil)
-			return dispatcher.EndGroups
-		}
+	if len(config.ValueOf.AllowedUsers) > 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatID) {
+		ctx.Reply(u, "You are not allowed to use this bot.", nil)
+		return dispatcher.EndGroups
 	}
 
 	if config.ValueOf.ForceSubChannel != "" {
-		isSubscribed := true // Implementa tu lógica real de suscripción si quieres
-		if !isSubscribed {
+		subscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatID)
+		if err != nil || !subscribed {
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
@@ -123,72 +119,92 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	docMedia, ok := u.EffectiveMessage.Media.(*tg.MessageMediaDocument)
-	if !ok {
-		ctx.Reply(u, "Unsupported media type.", nil)
+	update, err := utils.ForwardMessages(ctx, chatID, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
+	if err != nil {
+		ctx.Reply(u, fmt.Sprintf("Error forwarding message: %s", err), nil)
 		return dispatcher.EndGroups
 	}
 
+	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
+	docMedia := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	tgDoc := docMedia.Document
-	fileName := tgDoc.GetFileName()
-	mimeType := tgDoc.GetMimeType()
-	fileSize := tgDoc.GetSize()
 
-	isVideo := strings.HasPrefix(mimeType, "video")
-	needsConversion := isVideo && !strings.HasSuffix(strings.ToLower(fileName), ".mp4")
+	fileName := tgDoc.FileName
+	mimeType := tgDoc.MimeType
+	fileSize := tgDoc.Size
 
-	if needsConversion {
-		ctx.Reply(u, "Detected unsupported video format. Converting to MP4...", nil)
+	if fileName == "" {
+		fileName = "unknown_file"
+		if strings.Contains(strings.ToLower(mimeType), "video") {
+			fileName += ".mp4"
+		} else {
+			fileName += ".bin"
+		}
 	}
 
-	// Descargar archivo temporal
-	tempDir := os.TempDir()
-	tempPath := filepath.Join(tempDir, fileName)
-	outFile, err := os.Create(tempPath)
+	tempPath := filepath.Join(os.TempDir(), fileName)
+	f, err := os.Create(tempPath)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error creating temp file: %s", err), nil)
 		return dispatcher.EndGroups
 	}
-	defer outFile.Close()
+	defer f.Close()
 
-	if err := ctx.Raw.DownloadFile(context.Background(), tgDoc, outFile); err != nil {
+	if !strings.HasSuffix(strings.ToLower(fileName), ".mp4") && strings.Contains(strings.ToLower(mimeType), "video") {
+		ctx.Reply(u, "Detected unusual video format, converting to MP4...", nil)
+	}
+
+	inputFile := &tg.InputDocumentFileLocation{
+		ID:           tgDoc.ID,
+		AccessHash:   tgDoc.AccessHash,
+		FileReference: tgDoc.FileReference,
+	}
+
+	err = ctx.Raw.DownloadFile(context.Background(), inputFile, 0, fileSize, f)
+	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error downloading file: %s", err), nil)
 		return dispatcher.EndGroups
 	}
+	f.Close()
 
-	uploadPath := tempPath
-	if needsConversion {
-		convertedPath := filepath.Join(tempDir, strings.TrimSuffix(fileName, filepath.Ext(fileName))+".mp4")
-		cmd := exec.Command("ffmpeg", "-i", tempPath, "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-y", convertedPath)
+	convertedPath := tempPath
+	if !strings.HasSuffix(strings.ToLower(fileName), ".mp4") && strings.Contains(strings.ToLower(mimeType), "video") {
+		convertedPath = tempPath + "_converted.mp4"
+		cmd := exec.Command("ffmpeg", "-i", tempPath, "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-b:a", "128k", convertedPath)
 		if err := cmd.Run(); err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error converting video: %s", err), nil)
 			return dispatcher.EndGroups
 		}
-		uploadPath = convertedPath
+		fileName = filepath.Base(convertedPath)
 	}
 
-	// Subir al canal de log
-	logPeer := &tg.InputPeerChannel{ChannelID: config.ValueOf.LogChannelID}
-	uploadedMsg, err := ctx.Raw.SendFile(context.Background(), logPeer, uploadPath)
+	// Subir archivo al canal de log
+	logPeer := &tg.InputPeerChannel{
+		ChannelID: config.ValueOf.LogChannelID,
+		AccessHash: 0, // Ajustar si es necesario
+	}
+
+	msg, err := ctx.Raw.UploadFile(context.Background(), logPeer, convertedPath)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error uploading to log channel: %s", err), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Borrar archivos temporales
 	os.Remove(tempPath)
-	if needsConversion {
-		os.Remove(uploadPath)
+	if convertedPath != tempPath {
+		os.Remove(convertedPath)
 	}
 
-	emoji := fileTypeEmoji(mimeType)
-	sizeStr := formatFileSize(fileSize)
-	message := fmt.Sprintf("%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots", emoji, fileName, emoji, mimeType, sizeStr)
-
-	videoParam := fmt.Sprintf("%d", uploadedMsg.ID)
-	encodedVideoParam := url.QueryEscape(videoParam)
+	streamParam := fmt.Sprintf("%d", msg.ID)
+	encodedVideoParam := url.QueryEscape(streamParam)
 	encodedFilename := url.QueryEscape(fileName)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
+
+	message := fmt.Sprintf(
+		"🎬 File Name: %s\n💾 Size: %s\n⏳ @yoelbots",
+		fileName,
+		formatFileSize(fileSize),
+	)
 
 	row := tg.KeyboardButtonRow{
 		Buttons: []tg.KeyboardButtonClass{
@@ -200,11 +216,16 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	_, _ = ctx.Reply(u, message, &ext.ReplyOpts{
+	ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		NoWebpage:        false,
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
+
+	statsCache := cache.GetStatsCache()
+	if statsCache != nil {
+		_ = statsCache.RecordFileProcessed(fileSize)
+	}
 
 	return dispatcher.EndGroups
 }
