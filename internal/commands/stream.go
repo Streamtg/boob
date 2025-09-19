@@ -1,10 +1,11 @@
 package commands
 
 import (
-	"bytes"
+	"bufio"
 	"fmt"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"EverythingSuckz/fsb/config"
@@ -42,6 +43,7 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
+// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -58,6 +60,7 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
+// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -80,17 +83,46 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// Genera streaming en memoria usando FFmpeg y devuelve un reader
-func streamVideoInMemory(inputPath string) (*bytes.Buffer, error) {
-	var out bytes.Buffer
-	cmd := exec.Command("ffmpeg", "-i", inputPath, "-c:v", "libx264", "-c:a", "aac", "-f", "mp4", "pipe:1")
-	cmd.Stdout = &out
-	cmd.Stderr = nil // ignoramos logs de FFmpeg para no llenar consola
-	err := cmd.Run()
+// Convierte cualquier formato raro a MP4 con progreso
+func convertToMP4WithProgress(ctx *ext.Context, u *ext.Update, input, output string) error {
+	msg, _ := ctx.Reply(u, "⚠️ File format is not supported by browser, converting to MP4...\nProgress: 0%", nil)
+
+	durationCmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1", input)
+	out, err := durationCmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("FFmpeg streaming error: %v", err)
+		return fmt.Errorf("ffprobe error: %v", err)
 	}
-	return &out, nil
+	totalDuration, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+
+	cmd := exec.Command("ffmpeg", "-i", input, "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-y", output,
+		"-progress", "pipe:1", "-nostats")
+	stdout, _ := cmd.StdoutPipe()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	var lastPercent int
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "out_time_ms=") {
+			ms, _ := strconv.ParseFloat(strings.TrimPrefix(line, "out_time_ms="), 64)
+			seconds := ms / 1000000
+			percent := int(seconds / totalDuration * 100)
+			if percent != lastPercent && percent%5 == 0 {
+				lastPercent = percent
+				ctx.Edit(msg, fmt.Sprintf("⚠️ File format is not supported by browser, converting to MP4...\nProgress: %d%%", percent), nil)
+			}
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("ffmpeg error: %v", err)
+	}
+
+	ctx.Edit(msg, "✅ Conversion complete! The file is ready for streaming.", nil)
+	return nil
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
@@ -145,10 +177,62 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
+	// Detectar nombre y formato si no está presente
 	if file.FileName == "" {
-		file.FileName = "video.mp4"
+		var ext string
+		lowerMime := strings.ToLower(file.MimeType)
+		switch {
+		case strings.Contains(lowerMime, "image/jpeg"):
+			ext = ".jpg"
+			file.FileName = "photo" + ext
+		case strings.Contains(lowerMime, "image/png"):
+			ext = ".png"
+			file.FileName = "photo" + ext
+		case strings.Contains(lowerMime, "image/gif"):
+			ext = ".gif"
+			file.FileName = "animation" + ext
+		case strings.Contains(lowerMime, "video"):
+			ext = ".mp4"
+			file.FileName = "video" + ext
+		case strings.Contains(lowerMime, "audio"):
+			ext = ".mp3"
+			file.FileName = "audio" + ext
+		case strings.Contains(lowerMime, "pdf"):
+			ext = ".pdf"
+			file.FileName = "document" + ext
+		case strings.Contains(lowerMime, "zip"):
+			ext = ".zip"
+			file.FileName = "archive" + ext
+		case strings.Contains(lowerMime, "rar"):
+			ext = ".rar"
+			file.FileName = "archive" + ext
+		case strings.Contains(lowerMime, "text"):
+			ext = ".txt"
+			file.FileName = "text" + ext
+		case strings.Contains(lowerMime, "application"):
+			ext = ".bin"
+			file.FileName = "file" + ext
+		default:
+			ext = ""
+			file.FileName = "unknown"
+		}
 	}
 
+	// Si el archivo es video y no es MP4, convertirlo
+	if strings.Contains(strings.ToLower(file.MimeType), "video") && !strings.HasSuffix(strings.ToLower(file.FileName), ".mp4") {
+		input := file.FilePath      // archivo original
+		output := input + "_conv.mp4" // archivo convertido
+		if err := convertToMP4WithProgress(ctx, u, input, output); err != nil {
+			ctx.Reply(u, fmt.Sprintf("Conversion failed: %s", err.Error()), nil)
+			return dispatcher.EndGroups
+		}
+		file.FilePath = output
+		file.FileName = strings.TrimSuffix(file.FileName, filepath.Ext(file.FileName)) + ".mp4"
+		file.MimeType = "video/mp4"
+		file.FileSize = utils.FileSize(output)
+	}
+
+	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 	message := fmt.Sprintf(
@@ -158,25 +242,25 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		size,
 	)
 
-	// Generar stream en memoria (si se desea, aquí se puede pasar a HTTP endpoint para streaming real)
-	streamBuffer, err := streamVideoInMemory(file.FilePath)
-	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error streaming video: %v", err), nil)
-		return dispatcher.EndGroups
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
+	hash := utils.GetShortHash(fullHash)
+
+	statsCache := cache.GetStatsCache()
+	if statsCache != nil {
+		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Aquí solo construimos la URL usando fileID como ejemplo
-	videoParam := fmt.Sprintf("%d", messageID)
+	var markup *tg.ReplyInlineMarkup
+	row := tg.KeyboardButtonRow{}
+	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 	encodedVideoParam := url.QueryEscape(videoParam)
 	encodedFilename := url.QueryEscape(file.FileName)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
-
-	row := tg.KeyboardButtonRow{}
 	row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 		Text: "Streaming / Download",
 		URL:  streamURL,
 	})
-	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+	markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
@@ -186,8 +270,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 	}
-
-	_ = streamBuffer // aquí puedes enviarlo a tu HTTP handler para servir streaming en vivo
 
 	return dispatcher.EndGroups
 }
