@@ -4,6 +4,7 @@ import (
 	"EverythingSuckz/fsb/config"
 	"EverythingSuckz/fsb/internal/bot"
 	"EverythingSuckz/fsb/internal/cache"
+	"EverythingSuckz/fsb/internal/commands" // Añadido para cargar LoadStream
 	"EverythingSuckz/fsb/internal/database"
 	"EverythingSuckz/fsb/internal/routes"
 	"EverythingSuckz/fsb/internal/types"
@@ -12,11 +13,27 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/celestix/gotgproto"
 	"github.com/spf13/cobra"
-
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
+
+const versionString = "3.1.0"
+
+var rootCmd = &cobra.Command{
+	Use:               "fsb [command]",
+	Short:             "Telegram File Stream Bot",
+	Long:              "Telegram Bot to generate direct streamable links for telegram media.",
+	Example:           "fsb run --port 8080",
+	Version:           versionString,
+	CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
+	Run: func(cmd *cobra.Command, args []string) {
+		cmd.Help()
+	},
+}
+
+var startTime time.Time = time.Now()
 
 var runCmd = &cobra.Command{
 	Use:                "run",
@@ -25,7 +42,13 @@ var runCmd = &cobra.Command{
 	Run:                runApp,
 }
 
-var startTime time.Time = time.Now()
+var sessionCmd = &cobra.Command{
+	Use:   "session",
+	Short: "Generate a session string for the user account",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("Generando sesión... (implementación no modificada)")
+	},
+}
 
 func runApp(cmd *cobra.Command, args []string) {
 	utils.InitLogger(config.ValueOf.Dev)
@@ -39,13 +62,13 @@ func runApp(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Panic("Failed to start main bot", zap.Error(err))
 	}
-	
-	// Initialize database
+
+	// Inicializar database
 	err = database.InitDatabase(log)
 	if err != nil {
 		log.Panic("Failed to initialize database", zap.Error(err))
 	}
-	
+
 	cache.InitCache(log)
 	cache.InitStatsCache(log)
 	workers, err := bot.StartWorkers(log)
@@ -54,6 +77,13 @@ func runApp(cmd *cobra.Command, args []string) {
 		return
 	}
 	workers.AddDefaultClient(mainBot, mainBot.Self)
+
+	// Cargar el handler de streaming
+	cmdInstance := &commands.Command{
+		Log: log,
+	}
+	cmdInstance.LoadStream(mainBot.Dispatcher)
+
 	bot.StartUserBot(log)
 	mainLogger.Info("Server started", zap.Int("port", config.ValueOf.Port))
 	mainLogger.Info("File Stream Bot", zap.String("version", versionString))
@@ -82,4 +112,18 @@ func getRouter(log *zap.Logger) *gin.Engine {
 	})
 	routes.Load(log, router)
 	return router
+}
+
+func init() {
+	config.ValueOf.SetFlagsFromConfig(runCmd)
+	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(sessionCmd)
+	rootCmd.SetVersionTemplate(fmt.Sprintf(`Telegram File Stream Bot version %s`, versionString))
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }
