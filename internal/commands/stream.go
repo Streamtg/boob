@@ -1,11 +1,11 @@
 package commands
 
 import (
-	"bufio"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
-	"strconv"
+	"path/filepath"
 	"strings"
 
 	"EverythingSuckz/fsb/config"
@@ -43,7 +43,6 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -60,7 +59,6 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -83,62 +81,33 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// Convierte cualquier formato raro a MP4 con progreso
-func convertToMP4WithProgress(ctx *ext.Context, u *ext.Update, input, output string) error {
-	msg, _ := ctx.Reply(u, "⚠️ File format is not supported by browser, converting to MP4...\nProgress: 0%", nil)
+// Extensiones consideradas "raras" para navegador
+var rareVideoExts = []string{".mkv", ".avi", ".mov", ".flv", ".wmv", ".webm"}
 
-	durationCmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration",
-		"-of", "default=noprint_wrappers=1:nokey=1", input)
-	out, err := durationCmd.Output()
-	if err != nil {
-		return fmt.Errorf("ffprobe error: %v", err)
-	}
-	totalDuration, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-
-	cmd := exec.Command("ffmpeg", "-i", input, "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-y", output,
-		"-progress", "pipe:1", "-nostats")
-	stdout, _ := cmd.StdoutPipe()
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-
-	scanner := bufio.NewScanner(stdout)
-	var lastPercent int
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "out_time_ms=") {
-			ms, _ := strconv.ParseFloat(strings.TrimPrefix(line, "out_time_ms="), 64)
-			seconds := ms / 1000000
-			percent := int(seconds / totalDuration * 100)
-			if percent != lastPercent && percent%5 == 0 {
-				lastPercent = percent
-				ctx.Edit(msg, fmt.Sprintf("⚠️ File format is not supported by browser, converting to MP4...\nProgress: %d%%", percent), nil)
-			}
+func isRareFormat(filename string) bool {
+	ext := strings.ToLower(filepath.Ext(filename))
+	for _, e := range rareVideoExts {
+		if ext == e {
+			return true
 		}
 	}
-
-	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg error: %v", err)
-	}
-
-	ctx.Edit(msg, "✅ Conversion complete! The file is ready for streaming.", nil)
-	return nil
+	return false
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
-	chatId := u.EffectiveChat().GetID()
-	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
+	chatID := u.EffectiveChat().GetID()
+	peerChatId := ctx.PeerStorage.GetPeerById(chatID)
 	if peerChatId.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
 
-	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
+	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatID) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
 	if config.ValueOf.ForceSubChannel != "" {
-		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
+		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatID)
 		if err != nil || !isSubscribed {
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
@@ -163,7 +132,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
+	update, err := utils.ForwardMessages(ctx, chatID, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 		return dispatcher.EndGroups
@@ -177,80 +146,81 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Detectar nombre y formato si no está presente
 	if file.FileName == "" {
-		var ext string
-		lowerMime := strings.ToLower(file.MimeType)
-		switch {
-		case strings.Contains(lowerMime, "image/jpeg"):
-			ext = ".jpg"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/png"):
-			ext = ".png"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/gif"):
-			ext = ".gif"
-			file.FileName = "animation" + ext
-		case strings.Contains(lowerMime, "video"):
-			ext = ".mp4"
-			file.FileName = "video" + ext
-		case strings.Contains(lowerMime, "audio"):
-			ext = ".mp3"
-			file.FileName = "audio" + ext
-		case strings.Contains(lowerMime, "pdf"):
-			ext = ".pdf"
-			file.FileName = "document" + ext
-		case strings.Contains(lowerMime, "zip"):
-			ext = ".zip"
-			file.FileName = "archive" + ext
-		case strings.Contains(lowerMime, "rar"):
-			ext = ".rar"
-			file.FileName = "archive" + ext
-		case strings.Contains(lowerMime, "text"):
-			ext = ".txt"
-			file.FileName = "text" + ext
-		case strings.Contains(lowerMime, "application"):
-			ext = ".bin"
-			file.FileName = "file" + ext
-		default:
-			ext = ""
-			file.FileName = "unknown"
-		}
+		file.FileName = "file" + filepath.Ext(file.MimeType)
 	}
 
-	// Si el archivo es video y no es MP4, convertirlo
-	if strings.Contains(strings.ToLower(file.MimeType), "video") && !strings.HasSuffix(strings.ToLower(file.FileName), ".mp4") {
-		input := file.FilePath      // archivo original
-		output := input + "_conv.mp4" // archivo convertido
-		if err := convertToMP4WithProgress(ctx, u, input, output); err != nil {
-			ctx.Reply(u, fmt.Sprintf("Conversion failed: %s", err.Error()), nil)
-			return dispatcher.EndGroups
-		}
-		file.FilePath = output
-		file.FileName = strings.TrimSuffix(file.FileName, filepath.Ext(file.FileName)) + ".mp4"
-		file.MimeType = "video/mp4"
-		file.FileSize = utils.FileSize(output)
+	// Lanzar goroutine para conversión y subida si formato raro
+	if isRareFormat(file.FileName) {
+		go func(file *utils.File) {
+			ctx.Reply(u, "⚠️ The video format is not supported by browsers. Converting to MP4...", nil)
+
+			tmpFile := filepath.Join(os.TempDir(), file.FileName)
+			outFile := strings.TrimSuffix(tmpFile, filepath.Ext(tmpFile)) + ".mp4"
+
+			if err := utils.DownloadFile(ctx, file, tmpFile); err != nil {
+				ctx.Reply(u, fmt.Sprintf("Error downloading file: %s", err.Error()), nil)
+				return
+			}
+
+			cmd := exec.Command("ffmpeg", "-y", "-i", tmpFile, "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", outFile)
+			if err := cmd.Run(); err != nil {
+				ctx.Reply(u, fmt.Sprintf("Error converting video: %s", err.Error()), nil)
+				os.Remove(tmpFile)
+				return
+			}
+
+			uploaded, err := utils.UploadFileToChannel(ctx, config.ValueOf.LogChannelID, outFile)
+			if err != nil {
+				ctx.Reply(u, fmt.Sprintf("Error uploading converted video: %s", err.Error()), nil)
+				os.Remove(tmpFile)
+				os.Remove(outFile)
+				return
+			}
+
+			os.Remove(tmpFile)
+			os.Remove(outFile)
+
+			// Construir mensaje final para streaming
+			emoji := fileTypeEmoji(uploaded.MimeType)
+			size := formatFileSize(uploaded.FileSize)
+			message := fmt.Sprintf("%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
+				emoji, uploaded.FileName, emoji, uploaded.MimeType, size)
+
+			fullHash := utils.PackFile(uploaded.FileName, uploaded.FileSize, uploaded.MimeType, uploaded.ID)
+			hash := utils.GetShortHash(fullHash)
+
+			row := tg.KeyboardButtonRow{}
+			videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
+			encodedVideoParam := url.QueryEscape(videoParam)
+			encodedFilename := url.QueryEscape(uploaded.FileName)
+			streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
+			row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
+				Text: "Streaming / Download",
+				URL:  streamURL,
+			})
+			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+
+			ctx.Reply(u, "✅ Video is ready for streaming!", &ext.ReplyOpts{Markup: markup})
+
+			statsCache := cache.GetStatsCache()
+			if statsCache != nil {
+				_ = statsCache.RecordFileProcessed(uploaded.FileSize)
+			}
+		}(file)
+
+		return dispatcher.EndGroups
 	}
 
-	// Mensaje visual con emoji, tipo y tamaño
+	// Caso normal (no raro)
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
-	message := fmt.Sprintf(
-		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
-		emoji, file.FileName,
-		emoji, file.MimeType,
-		size,
-	)
+	message := fmt.Sprintf("%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
+		emoji, file.FileName, emoji, file.MimeType, size)
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 
-	statsCache := cache.GetStatsCache()
-	if statsCache != nil {
-		_ = statsCache.RecordFileProcessed(file.FileSize)
-	}
-
-	var markup *tg.ReplyInlineMarkup
 	row := tg.KeyboardButtonRow{}
 	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 	encodedVideoParam := url.QueryEscape(videoParam)
@@ -260,7 +230,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		Text: "Streaming / Download",
 		URL:  streamURL,
 	})
-	markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
