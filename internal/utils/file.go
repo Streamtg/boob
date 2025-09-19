@@ -11,17 +11,16 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-// File representa la metadata de un archivo (extiende si ya existe en tu repo)
+// File representa la metadata de un archivo
 type File struct {
 	FileName  string
 	FileSize  int64
 	MimeType  string
 	ID        int64
-	MessageID int // Nuevo: ID del mensaje en LOG_CHANNEL
+	MessageID int
 }
 
 // ConvertAndUploadVideo convierte un video en formato raro a MP4 y lo sube al canal de logs
-// Solo para videos raros; retorna metadata actualizada o error
 func ConvertAndUploadVideo(ctx *ext.Context, logChannelID int64, file *File) (*File, error) {
 	// Validar que el archivo es un video
 	if !strings.Contains(strings.ToLower(file.MimeType), "video") {
@@ -33,16 +32,16 @@ func ConvertAndUploadVideo(ctx *ext.Context, logChannelID int64, file *File) (*F
 	if err != nil {
 		return nil, fmt.Errorf("error al crear directorio temporal: %v", err)
 	}
-	defer os.RemoveAll(tempDir) // Limpiar el directorio temporal al finalizar
+	defer os.RemoveAll(tempDir)
 
-	// Descargar el archivo original desde Telegram usando su ID
+	// Descargar el archivo original desde Telegram
 	originalPath := filepath.Join(tempDir, file.FileName)
 	err = downloadFileFromTelegram(ctx, file.ID, originalPath)
 	if err != nil {
 		return nil, fmt.Errorf("error al descargar el archivo: %v", err)
 	}
 
-	// Generar nombre para el archivo convertido (reemplazar extensión por .mp4)
+	// Generar nombre para el archivo convertido
 	outputFileName := strings.TrimSuffix(file.FileName, filepath.Ext(file.FileName)) + ".mp4"
 	outputPath := filepath.Join(tempDir, outputFileName)
 
@@ -99,7 +98,6 @@ func downloadFileFromTelegram(ctx *ext.Context, fileID int64, outputPath string)
 
 // convertToMP4 convierte un video a formato MP4 usando FFmpeg
 func convertToMP4(inputPath, outputPath string) error {
-	// Comando FFmpeg: -i input -c:v libx264 -c:a aac -f mp4 output (compatible con streams)
 	cmd := exec.Command("ffmpeg", "-i", inputPath, "-c:v", "libx264", "-c:a", "aac", "-f", "mp4", outputPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -110,13 +108,11 @@ func convertToMP4(inputPath, outputPath string) error {
 
 // uploadFileToChannel sube un archivo al canal de logs y retorna el ID del mensaje y del archivo
 func uploadFileToChannel(ctx *ext.Context, logChannelID int64, filePath string) (int, int64, error) {
-	// Leer el archivo convertido
 	fileBytes, err := os.ReadFile(filePath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error al leer archivo convertido: %v", err)
 	}
 
-	// Crear documento para subir (ajusta si usas InputFilePart para archivos grandes)
 	document := &tg.InputMediaUploadedDocument{
 		File: &tg.InputFile{
 			Name:   filepath.Base(filePath),
@@ -125,7 +121,6 @@ func uploadFileToChannel(ctx *ext.Context, logChannelID int64, filePath string) 
 		MimeType: "video/mp4",
 	}
 
-	// Subir el archivo al canal de logs
 	update, err := ctx.Raw.MessagesSendMedia(&tg.MessagesSendMediaRequest{
 		Peer:  &tg.InputPeerChannel{ChannelID: logChannelID},
 		Media: document,
@@ -134,7 +129,6 @@ func uploadFileToChannel(ctx *ext.Context, logChannelID int64, filePath string) 
 		return 0, 0, fmt.Errorf("error al subir archivo al canal: %v", err)
 	}
 
-	// Extraer ID del mensaje y del archivo
 	var messageID int
 	var fileID int64
 	for _, u := range update.Updates {
