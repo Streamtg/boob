@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	"EverythingSuckz/fsb/config"  // Ajusta al path de tu repo (e.g., Streamtg/boob/config)
+	"EverythingSuckz/fsb/config"
 	"EverythingSuckz/fsb/internal/cache"
 	"EverythingSuckz/fsb/internal/utils"
 
@@ -15,16 +15,17 @@ import (
 	"github.com/celestix/gotgproto/storage"
 	"github.com/celestix/gotgproto/types"
 	"github.com/gotd/td/tg"
+	"go.uber.org/zap"
 )
 
-// command es tu struct existente para loaders (ajusta si es diferente)
-type command struct {
-	log *YourLogger // Asume un logger existente
+// Command estructura para comandos, incluye logger
+type Command struct {
+	Log *zap.Logger
 }
 
 // LoadStream registra el handler para procesar mensajes de media
-func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	defer m.log.Sugar().Info("Loaded") // Ajusta el logger a tu implementación
+func (m *Command) LoadStream(dispatcher dispatcher.Dispatcher) {
+	defer m.Log.Info("Loaded stream command")
 	dispatcher.AddHandler(
 		handlers.NewMessage(nil, sendLink),
 	)
@@ -99,11 +100,11 @@ func isRareVideoFormat(mime string, fileName string) bool {
 	}
 	// Formatos raros: MKV, AVI, FLV, WMV, etc.
 	return strings.HasSuffix(lowerFileName, ".mkv") ||
-	       strings.HasSuffix(lowerFileName, ".avi") ||
-	       strings.HasSuffix(lowerFileName, ".flv") ||
-	       strings.HasSuffix(lowerFileName, ".wmv") ||
-	       strings.Contains(lowerMime, "video/x-matroska") ||  // MKV MIME
-	       strings.Contains(lowerMime, "video/x-msvideo")     // AVI MIME
+		strings.HasSuffix(lowerFileName, ".avi") ||
+		strings.HasSuffix(lowerFileName, ".flv") ||
+		strings.HasSuffix(lowerFileName, ".wmv") ||
+		strings.Contains(lowerMime, "video/x-matroska") ||
+		strings.Contains(lowerMime, "video/x-msvideo")
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
@@ -167,7 +168,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			ext = ".gif"
 			file.FileName = "animation" + ext
 		case strings.Contains(lowerMime, "video"):
-			ext = ".mp4" // Por defecto para videos
+			ext = ".mp4"
 			file.FileName = "video" + ext
 		case strings.Contains(lowerMime, "audio"):
 			ext = ".mp3"
