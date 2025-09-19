@@ -10,8 +10,6 @@ import (
 	"strings"
 
 	"EverythingSuckz/fsb/config"
-	"EverythingSuckz/fsb/internal/cache"
-
 	"github.com/celestix/gotgproto/dispatcher"
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/ext"
@@ -88,14 +86,23 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	if len(config.ValueOf.AllowedUsers) > 0 && !contains(config.ValueOf.AllowedUsers, chatID) {
-		ctx.Reply(u, "You are not allowed to use this bot.", nil)
-		return dispatcher.EndGroups
+	if len(config.ValueOf.AllowedUsers) > 0 {
+		allowed := false
+		for _, id := range config.ValueOf.AllowedUsers {
+			if id == chatID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			ctx.Reply(u, "You are not allowed to use this bot.", nil)
+			return dispatcher.EndGroups
+		}
 	}
 
 	if config.ValueOf.ForceSubChannel != "" {
-		isSubscribed, err := isUserSubscribed(ctx, chatID)
-		if err != nil || !isSubscribed {
+		isSubscribed := true // Implementa tu lógica real de suscripción si quieres
+		if !isSubscribed {
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
@@ -111,26 +118,21 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
-	if err != nil {
-		return err
-	}
-	if !supported {
+	if err != nil || !supported {
 		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
 		return dispatcher.EndGroups
 	}
 
-	// Extraer document
 	docMedia, ok := u.EffectiveMessage.Media.(*tg.MessageMediaDocument)
 	if !ok {
 		ctx.Reply(u, "Unsupported media type.", nil)
 		return dispatcher.EndGroups
 	}
 
-	tgDoc := docMedia.Document.AsNotEmpty()
+	tgDoc := docMedia.Document
 	fileName := tgDoc.GetFileName()
 	mimeType := tgDoc.GetMimeType()
 	fileSize := tgDoc.GetSize()
-	fileID := tgDoc.GetID()
 
 	isVideo := strings.HasPrefix(mimeType, "video")
 	needsConversion := isVideo && !strings.HasSuffix(strings.ToLower(fileName), ".mp4")
@@ -139,17 +141,17 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		ctx.Reply(u, "Detected unsupported video format. Converting to MP4...", nil)
 	}
 
-	// Descargar temporalmente
+	// Descargar archivo temporal
 	tempDir := os.TempDir()
 	tempPath := filepath.Join(tempDir, fileName)
-	f, err := os.Create(tempPath)
+	outFile, err := os.Create(tempPath)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error creating temp file: %s", err), nil)
 		return dispatcher.EndGroups
 	}
-	defer f.Close()
+	defer outFile.Close()
 
-	if err := ctx.Raw.DownloadFile(context.Background(), tgDoc, f); err != nil {
+	if err := ctx.Raw.DownloadFile(context.Background(), tgDoc, outFile); err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error downloading file: %s", err), nil)
 		return dispatcher.EndGroups
 	}
@@ -166,25 +168,23 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	// Subir al canal de log
-	peer := &tg.InputPeerChannel{ChannelID: config.ValueOf.LogChannelID}
-	uploadedMsg, err := ctx.Raw.SendFile(context.Background(), peer, uploadPath)
+	logPeer := &tg.InputPeerChannel{ChannelID: config.ValueOf.LogChannelID}
+	uploadedMsg, err := ctx.Raw.SendFile(context.Background(), logPeer, uploadPath)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error uploading to log channel: %s", err), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Borrar archivo temporal
+	// Borrar archivos temporales
 	os.Remove(tempPath)
 	if needsConversion {
 		os.Remove(uploadPath)
 	}
 
-	// Preparar mensaje final
 	emoji := fileTypeEmoji(mimeType)
 	sizeStr := formatFileSize(fileSize)
 	message := fmt.Sprintf("%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots", emoji, fileName, emoji, mimeType, sizeStr)
 
-	// Botón de streaming
 	videoParam := fmt.Sprintf("%d", uploadedMsg.ID)
 	encodedVideoParam := url.QueryEscape(videoParam)
 	encodedFilename := url.QueryEscape(fileName)
@@ -207,19 +207,4 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	})
 
 	return dispatcher.EndGroups
-}
-
-// --- Helpers ---
-func contains(slice []int64, v int64) bool {
-	for _, s := range slice {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
-
-func isUserSubscribed(ctx *ext.Context, chatID int64) (bool, error) {
-	// Implementa tu verificación de suscripción al canal aquí
-	return true, nil
 }
