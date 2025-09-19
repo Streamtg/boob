@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -181,7 +182,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			ctx.Reply(u, fmt.Sprintf("Error preparing file for upload - %s", err.Error()), nil)
 			return dispatcher.EndGroups
 		}
-		uploaded, err := ctx.Raw.MessagesSendMedia(&tg.MessagesSendMediaRequest{
+		uploaded, err := ctx.Raw.MessagesSendMedia(ctx.Raw.Context, &tg.MessagesSendMediaRequest{
 			Peer: &tg.InputPeerChannel{ChannelID: config.ValueOf.LogChannelID},
 			Media: &tg.InputMediaUploadedDocument{
 				File:     inputFile,
@@ -306,7 +307,13 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	if needsConversion && processingMsg != nil {
 		// Edit processing message with final result
-		_, err = ctx.EditMessage(chatId, processingMsg.ID, message, replyOpts)
+		_, err = ctx.Raw.MessagesEditMessage(ctx.Raw.Context, &tg.MessagesEditMessageRequest{
+			Peer:        &tg.InputPeerUser{UserID: chatId},
+			ID:          processingMsg.ID,
+			Message:     message,
+			ReplyMarkup: markup,
+			NoWebpage:   false,
+		})
 		if err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error editing message - %s", err.Error()), nil)
 		}
