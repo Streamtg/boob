@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"strings"
 
-	"EverythingSuckz/fsb/config"
+	"EverythingSuckz/fsb/config"  // Ajusta al path de tu repo (e.g., Streamtg/boob/config)
 	"EverythingSuckz/fsb/internal/cache"
 	"EverythingSuckz/fsb/internal/utils"
 
@@ -17,8 +17,14 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// command es tu struct existente para loaders (ajusta si es diferente)
+type command struct {
+	log *YourLogger // Asume un logger existente
+}
+
+// LoadStream registra el handler para procesar mensajes de media
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	defer m.log.Sugar().Info("Loaded")
+	defer m.log.Sugar().Info("Loaded") // Ajusta el logger a tu implementación
 	dispatcher.AddHandler(
 		handlers.NewMessage(nil, sendLink),
 	)
@@ -80,6 +86,26 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
+// Identifica formatos de video raros (no MP4)
+func isRareVideoFormat(mime string, fileName string) bool {
+	lowerMime := strings.ToLower(mime)
+	lowerFileName := strings.ToLower(fileName)
+	if !strings.Contains(lowerMime, "video") {
+		return false
+	}
+	// MP4 no es raro
+	if strings.Contains(lowerMime, "video/mp4") || strings.HasSuffix(lowerFileName, ".mp4") {
+		return false
+	}
+	// Formatos raros: MKV, AVI, FLV, WMV, etc.
+	return strings.HasSuffix(lowerFileName, ".mkv") ||
+	       strings.HasSuffix(lowerFileName, ".avi") ||
+	       strings.HasSuffix(lowerFileName, ".flv") ||
+	       strings.HasSuffix(lowerFileName, ".wmv") ||
+	       strings.Contains(lowerMime, "video/x-matroska") ||  // MKV MIME
+	       strings.Contains(lowerMime, "video/x-msvideo")     // AVI MIME
+}
+
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -118,14 +144,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
-	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
-		return dispatcher.EndGroups
-	}
-
-	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
-	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
+	// Extraer información del archivo antes de reenviar
+	doc := u.EffectiveMessage.Media
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
@@ -147,7 +167,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			ext = ".gif"
 			file.FileName = "animation" + ext
 		case strings.Contains(lowerMime, "video"):
-			ext = ".mp4"
+			ext = ".mp4" // Por defecto para videos
 			file.FileName = "video" + ext
 		case strings.Contains(lowerMime, "audio"):
 			ext = ".mp3"
@@ -173,6 +193,36 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
+	// Reenviar mensaje al canal de logs
+	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
+	if err != nil {
+		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		return dispatcher.EndGroups
+	}
+
+	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
+
+	// Verificar si es un video en formato raro
+	isRareVideo := isRareVideoFormat(file.MimeType, file.FileName)
+	if isRareVideo {
+		// Convertir video a MP4 y reemplazar en el canal de logs
+		convertedFile, err := utils.ConvertAndUploadVideo(ctx, config.ValueOf.LogChannelID, file)
+		if err != nil {
+			ctx.Reply(u, fmt.Sprintf("Error converting video - %s", err.Error()), nil)
+			return dispatcher.EndGroups
+		}
+		// Actualizar file con los datos del video convertido
+		file = convertedFile
+		// Eliminar el mensaje original del canal de logs
+		err = utils.DeleteMessage(ctx, config.ValueOf.LogChannelID, messageID)
+		if err != nil {
+			ctx.Reply(u, fmt.Sprintf("Error deleting original message - %s", err.Error()), nil)
+			return dispatcher.EndGroups
+		}
+		// Actualizar messageID con el nuevo mensaje del video convertido
+		messageID = convertedFile.MessageID
+	}
+
 	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
@@ -193,7 +243,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	var markup *tg.ReplyInlineMarkup
 	row := tg.KeyboardButtonRow{}
-	// Generar botón para todos los tipos de archivo soportados
 	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 	encodedVideoParam := url.QueryEscape(videoParam)
 	encodedFilename := url.QueryEscape(file.FileName)
