@@ -37,8 +37,6 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 		return true, nil
 	case *tg.MessageMediaPhoto:
 		return true, nil
-	case tg.MessageMediaClass:
-		return false, dispatcher.EndGroups
 	default:
 		return false, nil
 	}
@@ -75,8 +73,6 @@ func fileTypeEmoji(mime string) string {
 		return "🗜️"
 	case strings.Contains(lowerMime, "text"):
 		return "📝"
-	case strings.Contains(lowerMime, "application"):
-		return "📄"
 	default:
 		return "📄"
 	}
@@ -117,6 +113,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
+	// Forward to log channel
 	update, err := utils.ForwardMessages(ctx, chatID, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error forwarding message: %s", err), nil)
@@ -127,6 +124,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	docMedia := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	tgDoc := docMedia.Document
 
+	// Obtener info del archivo
 	fileName := tgDoc.FileName
 	mimeType := tgDoc.MimeType
 	fileSize := tgDoc.Size
@@ -140,14 +138,15 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
+	// Descargar archivo temporalmente
 	tempPath := filepath.Join(os.TempDir(), fileName)
-	f, err := os.Create(tempPath)
+	err = utils.DownloadFileFromDocument(ctx.Raw, tgDoc, tempPath)
 	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error creating temp file: %s", err), nil)
+		ctx.Reply(u, fmt.Sprintf("Error downloading file: %s", err), nil)
 		return dispatcher.EndGroups
 	}
-	f.Close()
 
+	// Detectar si video raro y convertir a MP4
 	if !strings.HasSuffix(strings.ToLower(fileName), ".mp4") && strings.Contains(strings.ToLower(mimeType), "video") {
 		ctx.Reply(u, "Detected unusual video format, converting to MP4...", nil)
 
@@ -155,19 +154,23 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		cmd := exec.Command("ffmpeg", "-i", tempPath, "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-b:a", "128k", convertedPath)
 		if err := cmd.Run(); err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error converting video: %s", err), nil)
+			os.Remove(tempPath)
 			return dispatcher.EndGroups
 		}
+		os.Remove(tempPath)
 		fileName = filepath.Base(convertedPath)
 		tempPath = convertedPath
 	}
 
-	// Subir archivo al canal de log vía API Telegram
-	logMsg, err := utils.UploadFileToChannel(ctx.Raw, config.ValueOf.LogChannelID, tempPath)
+	// Subir al canal de log
+	logMsg, err := utils.UploadDocumentToChannel(ctx.Raw, config.ValueOf.LogChannelID, tempPath)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error uploading to log channel: %s", err), nil)
+		os.Remove(tempPath)
 		return dispatcher.EndGroups
 	}
 
+	// Borrar archivo temporal
 	os.Remove(tempPath)
 
 	streamParam := fmt.Sprintf("%d", logMsg.ID)
