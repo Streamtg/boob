@@ -45,7 +45,7 @@ func ConvertAndUploadVideo(ctx *ext.Context, logChannelID int64, file *File) (*F
 	outputFileName := strings.TrimSuffix(file.FileName, filepath.Ext(file.FileName)) + ".mp4"
 	outputPath := filepath.Join(tempDir, outputFileName)
 
-	// Ejecutar conversión a MP4 usando FFmpeg
+	// Ejecutar conversión a MP4 usando HandBrakeCLI
 	err = convertToMP4(originalPath, outputPath)
 	if err != nil {
 		return nil, fmt.Errorf("error al convertir el video a MP4: %v", err)
@@ -96,12 +96,14 @@ func downloadFileFromTelegram(ctx *ext.Context, fileID int64, outputPath string)
 	return nil
 }
 
-// convertToMP4 convierte un video a formato MP4 usando FFmpeg
+// convertToMP4 convierte un video a formato MP4 usando HandBrakeCLI
 func convertToMP4(inputPath, outputPath string) error {
-	cmd := exec.Command("ffmpeg", "-i", inputPath, "-c:v", "libx264", "-c:a", "aac", "-f", "mp4", outputPath)
+	// Comando HandBrakeCLI: -i input -o output --preset "Fast 1080p30" (preset para calidad rápida y buena)
+	// Puedes ajustar el preset (e.g., "Very Fast 1080p30" para más velocidad, o "HQ 1080p30 Surround" para mejor calidad)
+	cmd := exec.Command("HandBrakeCLI", "-i", inputPath, "-o", outputPath, "--preset", "Fast 1080p30")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("error en FFmpeg: %v, salida: %s", err, string(output))
+		return fmt.Errorf("error en HandBrakeCLI: %v, salida: %s", err, string(output))
 	}
 	return nil
 }
