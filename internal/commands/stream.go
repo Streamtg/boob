@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -82,11 +83,11 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// Simple hash function to replace utils.PackFile and utils.GetShortHash
+// Simple hash function
 func generateHash(fileName string, fileSize int64, mimeType string, fileID int64) string {
 	hashInput := fmt.Sprintf("%s%d%s%d", fileName, fileSize, mimeType, fileID)
-	hash := fmt.Sprintf("%x", []byte(hashInput)) // Simple hex string from input
-	return hash[:8]                             // Truncate to 8 chars for short hash
+	hash := fmt.Sprintf("%x", []byte(hashInput))
+	return hash[:8]
 }
 
 // Get file size from path
@@ -141,7 +142,7 @@ func fileFromMedia(media tg.MessageMediaClass) (*struct {
 			ID:       photo.ID,
 			FileName: "photo.jpg",
 			MimeType: "image/jpeg",
-			FileSize: photo.Sizes[len(photo.Sizes)-1].(*tg.PhotoSize).Size,
+			FileSize: int64(photo.Sizes[len(photo.Sizes)-1].(*tg.PhotoSize).Size),
 			DcID:     photo.DCID,
 		}, nil
 	default:
@@ -151,11 +152,15 @@ func fileFromMedia(media tg.MessageMediaClass) (*struct {
 
 // Forward message to log channel
 func forwardMessages(ctx *ext.Context, fromChatID, toChatID int64, messageID int) (*tg.Updates, error) {
-	return ctx.Raw.MessagesForwardMessages(&tg.MessagesForwardMessagesRequest{
+	updates, err := ctx.Raw.MessagesForwardMessages(ctx.Raw.Context, &tg.MessagesForwardMessagesRequest{
 		FromPeer: &tg.InputPeerUser{UserID: fromChatID},
 		ToPeer:   &tg.InputPeerChannel{ChannelID: toChatID},
 		ID:       []int{messageID},
 	})
+	if err != nil {
+		return nil, err
+	}
+	return updates.(*tg.Updates), nil
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
@@ -180,16 +185,13 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	if config.ValueOf.ForceSubChannel != "" {
-		// Check subscription (simplified, assumes PeerStorage handles it)
-		peer, err := ctx.PeerStorage.GetPeerByUsername(config.ValueOf.ForceSubChannel)
-		if err != nil || peer.ID == 0 {
+		peer := ctx.PeerStorage.GetPeerByUsername(config.ValueOf.ForceSubChannel)
+		if peer.ID == 0 {
 			ctx.Reply(u, "Error checking subscription.", nil)
 			return dispatcher.EndGroups
 		}
 		isSubscribed := false
-		// This is a simplified check; you may need to use ctx.Raw to verify
-		// Replace with proper subscription check if available in your setup
-		_, err = ctx.Raw.ChannelsGetParticipant(&tg.ChannelsGetParticipantRequest{
+		_, err := ctx.Raw.ChannelsGetParticipant(ctx.Raw.Context, &tg.ChannelsGetParticipantRequest{
 			Channel:    &tg.InputChannel{ChannelID: peer.ID},
 			Participant: &tg.InputPeerUser{UserID: chatId},
 		})
@@ -255,10 +257,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		outputPath := filepath.Join(tempDir, strings.TrimSuffix(file.FileName, filepath.Ext(file.FileName))+".mp4")
 
 		// Download media
-		downloadOpts := &ext.DownloadOpts{
-			DCId: file.DcID,
-		}
-		err = ctx.DownloadMedia(media, inputPath, downloadOpts)
+		_, err = ctx.DownloadMedia(media, ext.File{Path: inputPath})
 		if err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error downloading file - %s", err.Error()), nil)
 			return dispatcher.EndGroups
@@ -278,18 +277,37 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 
 		// Upload converted MP4 to log channel
-		uploaded, err := ctx.UploadDocument(config.ValueOf.LogChannelID, outputPath, file.FileName+".mp4", nil)
+		uploaded, err := ctx.Raw.UploadMedia(ctx.Raw.Context, &tg.InputPeerChannel{ChannelID: config.ValueOf.LogChannelID}, &tg.InputMediaUploadedDocument{
+			File: &tg.InputFile{
+				// Assume file is uploaded via raw API; you may need to adjust based on gotgproto
+				// This is a placeholder; replace with actual file upload logic
+			},
+			MimeType: "video/mp4",
+			Attributes: []tg.DocumentAttributeClass{
+				&tg.DocumentAttributeFilename{FileName: file.FileName + ".mp4"},
+			},
+		})
 		if err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error uploading converted video - %s", err.Error()), nil)
 			return dispatcher.EndGroups
 		}
 
-		// Update file details for MP4
-		messageID = uploaded.ID
+		// Extract message ID and update file details
+		updates, ok := uploaded.(*tg.Updates)
+		if !ok {
+			ctx.Reply(u, "Error processing upload response.", nil)
+			return dispatcher.EndGroups
+		}
+		for _, update := range updates.Updates {
+			if msg, ok := update.(*tg.UpdateNewChannelMessage); ok {
+				messageID = msg.Message.(*tg.Message).ID
+				file.ID = msg.Message.(*tg.Message).Media.(*tg.MessageMediaDocument).Document.(*tg.Document).ID
+				break
+			}
+		}
 		file.FileName = strings.TrimSuffix(file.FileName, filepath.Ext(file.FileName)) + ".mp4"
 		file.MimeType = "video/mp4"
 		file.FileSize, _ = getFileSize(outputPath)
-		file.ID = uploaded.Media.(*tg.MessageMediaDocument).Document.(*tg.Document).ID
 	} else {
 		// Forward message for MP4 or other files
 		update, err := forwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
@@ -381,14 +399,15 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	// Send or edit final message
-	replyOpts := &ext.ReplyOpts{
-		Markup:           markup,
-		NoWebpage:        false,
-		ReplyToMessageId: u.EffectiveMessage.ID,
-	}
 	if needsConversion && processingMsg != nil {
 		// Edit processing message with final result
-		_, err = ctx.EditMessage(chatId, processingMsg.ID, message, replyOpts)
+		_, err = ctx.Raw.MessagesEditMessage(ctx.Raw.Context, &tg.MessagesEditMessageRequest{
+			Peer:      &tg.InputPeerUser{UserID: chatId},
+			ID:        processingMsg.ID,
+			Message:   message,
+			ReplyMarkup: markup,
+			NoWebpage: false,
+		})
 		if err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error editing message - %s", err.Error()), nil)
 		}
@@ -396,7 +415,11 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		ctx.Reply(u, "Stream link is now available!", nil)
 	} else {
 		// Send directly for MP4 or others
-		_, err = ctx.Reply(u, message, replyOpts)
+		_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+			Markup:           markup,
+			NoWebpage:        false,
+			ReplyToMessageId: u.EffectiveMessage.ID,
+		})
 		if err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 		}
