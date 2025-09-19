@@ -1,8 +1,10 @@
 package commands
 
 import (
+	"bytes"
 	"fmt"
 	"net/url"
+	"os/exec"
 	"strings"
 
 	"EverythingSuckz/fsb/config"
@@ -40,7 +42,6 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -57,7 +58,6 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -78,6 +78,19 @@ func fileTypeEmoji(mime string) string {
 	default:
 		return "📄"
 	}
+}
+
+// Genera streaming en memoria usando FFmpeg y devuelve un reader
+func streamVideoInMemory(inputPath string) (*bytes.Buffer, error) {
+	var out bytes.Buffer
+	cmd := exec.Command("ffmpeg", "-i", inputPath, "-c:v", "libx264", "-c:a", "aac", "-f", "mp4", "pipe:1")
+	cmd.Stdout = &out
+	cmd.Stderr = nil // ignoramos logs de FFmpeg para no llenar consola
+	err := cmd.Run()
+	if err != nil {
+		return nil, fmt.Errorf("FFmpeg streaming error: %v", err)
+	}
+	return &out, nil
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
@@ -132,48 +145,10 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Detectar nombre y formato si no está presente
 	if file.FileName == "" {
-		var ext string
-		lowerMime := strings.ToLower(file.MimeType)
-		switch {
-		case strings.Contains(lowerMime, "image/jpeg"):
-			ext = ".jpg"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/png"):
-			ext = ".png"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/gif"):
-			ext = ".gif"
-			file.FileName = "animation" + ext
-		case strings.Contains(lowerMime, "video"):
-			ext = ".mp4"
-			file.FileName = "video" + ext
-		case strings.Contains(lowerMime, "audio"):
-			ext = ".mp3"
-			file.FileName = "audio" + ext
-		case strings.Contains(lowerMime, "pdf"):
-			ext = ".pdf"
-			file.FileName = "document" + ext
-		case strings.Contains(lowerMime, "zip"):
-			ext = ".zip"
-			file.FileName = "archive" + ext
-		case strings.Contains(lowerMime, "rar"):
-			ext = ".rar"
-			file.FileName = "archive" + ext
-		case strings.Contains(lowerMime, "text"):
-			ext = ".txt"
-			file.FileName = "text" + ext
-		case strings.Contains(lowerMime, "application"):
-			ext = ".bin"
-			file.FileName = "file" + ext
-		default:
-			ext = ""
-			file.FileName = "unknown"
-		}
+		file.FileName = "video.mp4"
 	}
 
-	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 	message := fmt.Sprintf(
@@ -183,26 +158,25 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		size,
 	)
 
-	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
-	hash := utils.GetShortHash(fullHash)
-
-	statsCache := cache.GetStatsCache()
-	if statsCache != nil {
-		_ = statsCache.RecordFileProcessed(file.FileSize)
+	// Generar stream en memoria (si se desea, aquí se puede pasar a HTTP endpoint para streaming real)
+	streamBuffer, err := streamVideoInMemory(file.FilePath)
+	if err != nil {
+		ctx.Reply(u, fmt.Sprintf("Error streaming video: %v", err), nil)
+		return dispatcher.EndGroups
 	}
 
-	var markup *tg.ReplyInlineMarkup
-	row := tg.KeyboardButtonRow{}
-	// Generar botón para todos los tipos de archivo soportados
-	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
+	// Aquí solo construimos la URL usando fileID como ejemplo
+	videoParam := fmt.Sprintf("%d", messageID)
 	encodedVideoParam := url.QueryEscape(videoParam)
 	encodedFilename := url.QueryEscape(file.FileName)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
+
+	row := tg.KeyboardButtonRow{}
 	row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 		Text: "Streaming / Download",
 		URL:  streamURL,
 	})
-	markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
@@ -212,6 +186,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 	}
+
+	_ = streamBuffer // aquí puedes enviarlo a tu HTTP handler para servir streaming en vivo
 
 	return dispatcher.EndGroups
 }
