@@ -44,7 +44,6 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -61,7 +60,6 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -148,54 +146,31 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		ctx.Reply(u, fmt.Sprintf("Error creating temp file: %s", err), nil)
 		return dispatcher.EndGroups
 	}
-	defer f.Close()
+	f.Close()
 
 	if !strings.HasSuffix(strings.ToLower(fileName), ".mp4") && strings.Contains(strings.ToLower(mimeType), "video") {
 		ctx.Reply(u, "Detected unusual video format, converting to MP4...", nil)
-	}
 
-	inputFile := &tg.InputDocumentFileLocation{
-		ID:           tgDoc.ID,
-		AccessHash:   tgDoc.AccessHash,
-		FileReference: tgDoc.FileReference,
-	}
-
-	err = ctx.Raw.DownloadFile(context.Background(), inputFile, 0, fileSize, f)
-	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error downloading file: %s", err), nil)
-		return dispatcher.EndGroups
-	}
-	f.Close()
-
-	convertedPath := tempPath
-	if !strings.HasSuffix(strings.ToLower(fileName), ".mp4") && strings.Contains(strings.ToLower(mimeType), "video") {
-		convertedPath = tempPath + "_converted.mp4"
+		convertedPath := tempPath + "_converted.mp4"
 		cmd := exec.Command("ffmpeg", "-i", tempPath, "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-b:a", "128k", convertedPath)
 		if err := cmd.Run(); err != nil {
 			ctx.Reply(u, fmt.Sprintf("Error converting video: %s", err), nil)
 			return dispatcher.EndGroups
 		}
 		fileName = filepath.Base(convertedPath)
+		tempPath = convertedPath
 	}
 
-	// Subir archivo al canal de log
-	logPeer := &tg.InputPeerChannel{
-		ChannelID: config.ValueOf.LogChannelID,
-		AccessHash: 0, // Ajustar si es necesario
-	}
-
-	msg, err := ctx.Raw.UploadFile(context.Background(), logPeer, convertedPath)
+	// Subir archivo al canal de log vía API Telegram
+	logMsg, err := utils.UploadFileToChannel(ctx.Raw, config.ValueOf.LogChannelID, tempPath)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error uploading to log channel: %s", err), nil)
 		return dispatcher.EndGroups
 	}
 
 	os.Remove(tempPath)
-	if convertedPath != tempPath {
-		os.Remove(convertedPath)
-	}
 
-	streamParam := fmt.Sprintf("%d", msg.ID)
+	streamParam := fmt.Sprintf("%d", logMsg.ID)
 	encodedVideoParam := url.QueryEscape(streamParam)
 	encodedFilename := url.QueryEscape(fileName)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
