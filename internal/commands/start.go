@@ -35,7 +35,6 @@ func start(ctx *ext.Context, u *ext.Update) error {
 	welcomeMessage := "📢 Hello!\n\n" +
 		"Send or forward any file to me, and I will provide a streaming and download link.\n\n" +
 		"Join my official update channel: @yoelbotsx\n\n" +
-		"Link validity: 24 hours ⏳\n" +
 		"Pro Tip: Use a fast browser for lightning-fast downloads! 🔥\n\n" +
 		"Use /stats to view bot statistics."
 
