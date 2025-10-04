@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 
@@ -33,14 +34,11 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 		return true, nil
 	case *tg.MessageMediaPhoto:
 		return true, nil
-	case tg.MessageMediaClass:
-		return false, dispatcher.EndGroups
 	default:
-		return false, nil
+		return false, dispatcher.EndGroups
 	}
 }
 
-// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -57,7 +55,6 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// Emoji según tipo de archivo
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -80,7 +77,6 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// Sanitiza nombres de archivo
 func sanitizeFileName(name string) string {
 	name = strings.ReplaceAll(name, " ", "_")
 	name = strings.Map(func(r rune) rune {
@@ -90,6 +86,17 @@ func sanitizeFileName(name string) string {
 		return r
 	}, name)
 	return name
+}
+
+func formatDuration(seconds float64) string {
+	total := int(math.Round(seconds))
+	hours := total / 3600
+	minutes := (total % 3600) / 60
+	secs := total % 60
+	if hours > 0 {
+		return fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, secs)
+	}
+	return fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, secs)
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
@@ -137,14 +144,13 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
-	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
-	file, err := utils.FileFromMedia(doc)
+	media := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
+	file, err := utils.FileFromMedia(media)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Detectar nombre y formato si no está presente
 	if file.FileName == "" {
 		var ext string
 		lowerMime := strings.ToLower(file.MimeType)
@@ -180,47 +186,32 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 			ext = ".bin"
 			file.FileName = "file" + ext
 		default:
-			ext = ""
 			file.FileName = "unknown"
 		}
 	}
 
 	file.FileName = sanitizeFileName(file.FileName)
-
-	// Emoji y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 
-	// ---------------------------
-	// Duración desde Document.Attributes
-	// ---------------------------
 	durationMsg := ""
-	if docDoc, ok := doc.(*tg.MessageMediaDocument); ok {
-		for _, attr := range docDoc.Document.Attributes {
-			switch a := attr.(type) {
-			case *tg.DocumentAttributeVideo:
-				hours := a.Duration / 3600
-				minutes := (a.Duration % 3600) / 60
-				seconds := a.Duration % 60
-				if hours > 0 {
-					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
-				} else {
-					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
-				}
-			case *tg.DocumentAttributeAudio:
-				hours := a.Duration / 3600
-				minutes := (a.Duration % 3600) / 60
-				seconds := a.Duration % 60
-				if hours > 0 {
-					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
-				} else {
-					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
-				}
+	switch m := media.(type) {
+	case *tg.MessageMediaVideo:
+		durationMsg = formatDuration(m.Duration)
+	case *tg.MessageMediaAudio:
+		durationMsg = formatDuration(m.Duration)
+	case *tg.MessageMediaDocument:
+		// Si es un documento de video/audio, extraemos duración de DocumentAttribute
+		switch doc := m.Document.(type) {
+		case *tg.Document:
+			if doc.Video != nil {
+				durationMsg = formatDuration(float64(doc.Video.Duration))
+			} else if doc.Audio != nil {
+				durationMsg = formatDuration(float64(doc.Audio.Duration))
 			}
 		}
 	}
 
-	// Mensaje final
 	message := fmt.Sprintf(
 		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n%s\n\n⏳ @yoelbots",
 		emoji, file.FileName,
@@ -237,7 +228,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Crear botón de streaming/download
 	row := tg.KeyboardButtonRow{}
 	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 	encodedVideoParam := url.QueryEscape(videoParam)
