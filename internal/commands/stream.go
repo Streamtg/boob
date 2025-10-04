@@ -38,6 +38,22 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
+func formatFileSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
+	default:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
+	}
+}
+
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -60,7 +76,7 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// Función para obtener el ID y nombre del usuario que envió el mensaje
+// Extrae ID y nombre del usuario de manera segura
 func getSenderInfo(ctx *ext.Context, from tg.PeerClass) (int64, string) {
 	switch v := from.(type) {
 	case *tg.PeerUser:
@@ -112,7 +128,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Obtener información del remitente de manera segura
+	// Obtener información del remitente
 	senderID, senderName := getSenderInfo(ctx, u.EffectiveMessage.FromID)
 
 	// Reenviar mensaje al log channel
@@ -122,12 +138,13 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Enviar info del usuario en el log channel
-	infoMessage := fmt.Sprintf("📤 Enviado por: %s (ID: %d)", senderName, senderID)
-	_, _ = ctx.Reply(u, infoMessage, &ext.ReplyOpts{
-		ReplyToMessageId: u.EffectiveMessage.ID,
+	// Enviar info del usuario al log channel (solo visible ahí)
+	logMessage := fmt.Sprintf("📤 Contenido enviado por: %s (ID: %d)", senderName, senderID)
+	_, _ = ctx.Reply(u, logMessage, &ext.ReplyOpts{
+		ReplyToMessageId: update.Updates[0].(*tg.UpdateMessageID).ID,
 	})
 
+	// Obtener el archivo/media reenviado
 	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	file, err := utils.FileFromMedia(doc)
@@ -166,6 +183,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	})
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
+	// Responder al usuario sin revelar su identidad
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		NoWebpage:        false,
