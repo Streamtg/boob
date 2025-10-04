@@ -18,7 +18,7 @@ import (
 )
 
 // ---------------------------
-// Registro de comando
+// Registro del comando
 // ---------------------------
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	defer m.log.Sugar().Info("Loaded")
@@ -39,8 +39,6 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 		return true, nil
 	case *tg.MessageMediaPhoto:
 		return true, nil
-	case tg.MessageMediaClass:
-		return false, dispatcher.EndGroups
 	default:
 		return false, nil
 	}
@@ -83,10 +81,8 @@ func fileTypeEmoji(mime string) string {
 		return "🗜️"
 	case strings.Contains(lowerMime, "text"):
 		return "📝"
-	case strings.Contains(lowerMime, "word"), strings.Contains(lowerMime, "excel"), strings.Contains(lowerMime, "powerpoint"):
+	case strings.Contains(lowerMime, "application"):
 		return "📄"
-	case strings.Contains(lowerMime, "epub"):
-		return "📚"
 	default:
 		return "📄"
 	}
@@ -104,20 +100,6 @@ func sanitizeFileName(name string) string {
 		return r
 	}, name)
 	return name
-}
-
-// ---------------------------
-// Previsualización placeholder
-// ---------------------------
-func generatePreview(file interface{}) string {
-	return ""
-}
-
-// ---------------------------
-// Verificación de seguridad placeholder
-// ---------------------------
-func isFileSafe(file interface{}) bool {
-	return true
 }
 
 // ---------------------------
@@ -220,7 +202,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
-	// Sanitizar nombre
 	file.FileName = sanitizeFileName(file.FileName)
 
 	// Emoji y tamaño
@@ -228,67 +209,41 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	size := formatFileSize(file.FileSize)
 
 	// ---------------------------
-	// Duración directamente del Media
+	// Duración desde Document.Attributes
 	// ---------------------------
 	durationMsg := ""
-	switch media := doc.(type) {
-	case *tg.MessageMediaDocument:
-		if video := media.Document.AsVideo(); video != nil {
-			hours := video.Duration / 3600
-			minutes := (video.Duration % 3600) / 60
-			seconds := video.Duration % 60
-			if hours > 0 {
-				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
-			} else {
-				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
+	if docDoc, ok := doc.(*tg.MessageMediaDocument); ok {
+		for _, attr := range docDoc.Document.Attributes {
+			switch a := attr.(type) {
+			case *tg.DocumentAttributeVideo:
+				hours := a.Duration / 3600
+				minutes := (a.Duration % 3600) / 60
+				seconds := a.Duration % 60
+				if hours > 0 {
+					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
+				} else {
+					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
+				}
+			case *tg.DocumentAttributeAudio:
+				hours := a.Duration / 3600
+				minutes := (a.Duration % 3600) / 60
+				seconds := a.Duration % 60
+				if hours > 0 {
+					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
+				} else {
+					durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
+				}
 			}
-		}
-		if audio := media.Document.AsAudio(); audio != nil {
-			hours := audio.Duration / 3600
-			minutes := (audio.Duration % 3600) / 60
-			seconds := audio.Duration % 60
-			if hours > 0 {
-				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
-			} else {
-				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
-			}
-		}
-	case *tg.MessageMediaVideo:
-		hours := media.Video.Duration / 3600
-		minutes := (media.Video.Duration % 3600) / 60
-		seconds := media.Video.Duration % 60
-		if hours > 0 {
-			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
-		} else {
-			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
-		}
-	case *tg.MessageMediaAudio:
-		hours := media.Audio.Duration / 3600
-		minutes := (media.Audio.Duration % 3600) / 60
-		seconds := media.Audio.Duration % 60
-		if hours > 0 {
-			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
-		} else {
-			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
 		}
 	}
 
-	// Previsualización y seguridad placeholders
-	preview := generatePreview(file)
-	safe := isFileSafe(file)
-	safeMessage := ""
-	if !safe {
-		safeMessage = "\n⚠️ Warning: File may be unsafe!"
-	}
-
-	// Construir mensaje final
+	// Mensaje final
 	message := fmt.Sprintf(
-		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n%s\n%s\n\n⏳ @yoelbots",
+		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n%s\n\n⏳ @yoelbots",
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
 		durationMsg,
-		preview+safeMessage,
 	)
 
 	// Hash para streaming
