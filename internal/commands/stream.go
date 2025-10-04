@@ -17,9 +17,6 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-// ---------------------------
-// Registro del comando
-// ---------------------------
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	defer m.log.Sugar().Info("Loaded")
 	dispatcher.AddHandler(
@@ -27,9 +24,6 @@ func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	)
 }
 
-// ---------------------------
-// Filtrado de medios soportados
-// ---------------------------
 func supportedMediaFilter(m *types.Message) (bool, error) {
 	if m.Media == nil {
 		return false, dispatcher.EndGroups
@@ -39,14 +33,14 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 		return true, nil
 	case *tg.MessageMediaPhoto:
 		return true, nil
+	case tg.MessageMediaClass:
+		return false, dispatcher.EndGroups
 	default:
 		return false, nil
 	}
 }
 
-// ---------------------------
-// Tamaño legible
-// ---------------------------
+// Convierte bytes a tamaño legible
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -63,9 +57,7 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// ---------------------------
 // Emoji según tipo de archivo
-// ---------------------------
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -88,9 +80,7 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// ---------------------------
 // Sanitiza nombres de archivo
-// ---------------------------
 func sanitizeFileName(name string) string {
 	name = strings.ReplaceAll(name, " ", "_")
 	name = strings.Map(func(r rune) rune {
@@ -102,9 +92,6 @@ func sanitizeFileName(name string) string {
 	return name
 }
 
-// ---------------------------
-// Función principal de envío de link
-// ---------------------------
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -112,13 +99,11 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Validación de usuarios permitidos
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
-	// Validación de suscripción forzada
 	if config.ValueOf.ForceSubChannel != "" {
 		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
 		if err != nil || !isSubscribed {
@@ -136,7 +121,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
-	// Filtrado de medios soportados
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil {
 		return err
@@ -146,7 +130,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Forward al canal de logs
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
@@ -246,11 +229,9 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		durationMsg,
 	)
 
-	// Hash para streaming
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 
-	// Registrar estadísticas
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
@@ -268,7 +249,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	})
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	// Enviar mensaje
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		NoWebpage:        false,
