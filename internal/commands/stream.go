@@ -17,26 +17,27 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-// LoadStream registers the main message handler
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	defer m.log.Sugar().Info("Stream handler loaded")
-	dispatcher.AddHandler(handlers.NewMessage(nil, sendLink))
+	defer m.log.Sugar().Info("Loaded")
+	dispatcher.AddHandler(
+		handlers.NewMessage(nil, sendLink),
+	)
 }
 
-// supportedMediaFilter checks if the message contains supported media
 func supportedMediaFilter(m *types.Message) (bool, error) {
 	if m.Media == nil {
 		return false, dispatcher.EndGroups
 	}
 	switch m.Media.(type) {
-	case *tg.MessageMediaDocument, *tg.MessageMediaPhoto:
+	case *tg.MessageMediaDocument:
+		return true, nil
+	case *tg.MessageMediaPhoto:
 		return true, nil
 	default:
 		return false, dispatcher.EndGroups
 	}
 }
 
-// formatFileSize converts bytes to human-readable string
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -53,7 +54,6 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
-// fileTypeEmoji returns an emoji representing the file type
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -74,23 +74,23 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// buildStreamURL constructs the streaming/download link
-func buildStreamURL(messageID int, hash, filename string) string {
-	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
-	return fmt.Sprintf(
-		"https://file.streamgramm.workers.dev/?video=%s&filename=%s",
-		url.QueryEscape(videoParam),
-		url.QueryEscape(filename),
-	)
+func toItalic(text string) string {
+	var result strings.Builder
+	for _, r := range text {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			result.WriteRune(rune(0x1D434 + (r - 'A')))
+		case r >= 'a' && r <= 'z':
+			result.WriteRune(rune(0x1D44E + (r - 'a')))
+		case r >= '0' && r <= '9':
+			result.WriteRune(rune(0x1D7CE + (r - '0')))
+		default:
+			result.WriteRune(r)
+		}
+	}
+	return result.String()
 }
 
-// replyError centralizes error responses
-func replyError(ctx *ext.Context, u *ext.Update, err error) dispatcher.Control {
-	ctx.Reply(u, fmt.Sprintf("⚠️ Error: %s", err.Error()), nil)
-	return dispatcher.EndGroups
-}
-
-// sendLink handles messages with media and generates streaming/download links
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChat := ctx.PeerStorage.GetPeerById(chatId)
@@ -98,13 +98,11 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Check allowed users
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
-		ctx.Reply(u, "⚠️ You are not allowed to use this bot.", nil)
+		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
-	// Force subscription check
 	if config.ValueOf.ForceSubChannel != "" {
 		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
 		if err != nil || !isSubscribed {
@@ -117,59 +115,55 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 				},
 			}
 			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-			ctx.Reply(u, "⚠️ Please join our channel to access streaming/download links.", &ext.ReplyOpts{Markup: markup})
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{Markup: markup})
 			return dispatcher.EndGroups
 		}
 	}
 
-	// Validate media type
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
-	if err != nil {
-		return replyError(ctx, u, err)
-	}
-	if !supported {
-		ctx.Reply(u, "⚠️ Sorry, this message type is unsupported.", nil)
+	if err != nil || !supported {
+		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
 		return dispatcher.EndGroups
 	}
 
-	// Forward message to log channel
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
-		return replyError(ctx, u, err)
+		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		return dispatcher.EndGroups
 	}
 
 	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
-		return replyError(ctx, u, err)
+		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		return dispatcher.EndGroups
 	}
-
 	if file.FileName == "" {
 		file.FileName = "unknown"
 	}
 
-	emoji := fileTypeEmoji(file.MimeType)
+	// Mensaje profesional con alineación clara
 	message := fmt.Sprintf(
-		"🎬 *File Name:* %s\n🎬 *File Type:* %s\n🎬 *File Size:* %s\n\n⚠️ *No child abuse content allowed. Violators will be banned and reported.*\n⏳ @yoelbots",
-		file.FileName,
-		file.MimeType,
-		formatFileSize(file.FileSize),
+		"%s *File Name:* %s\n%s *File Type:* %s\n%s *File Size:* %s\n\n⚠️ *Sending or forwarding child abuse content will result in ban and report*\n\n⏳ _@yoelbots_",
+		fileTypeEmoji(file.MimeType), toItalic(file.FileName),
+		fileTypeEmoji(file.MimeType), toItalic(file.MimeType),
+		fileTypeEmoji(file.MimeType), toItalic(formatFileSize(file.FileSize)),
 	)
 
-	// Generate short hash for link
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 
-	// Record stats
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Build streaming/download button
 	row := tg.KeyboardButtonRow{}
-	streamURL := buildStreamURL(messageID, hash, file.FileName)
+	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
+	encodedVideoParam := url.QueryEscape(videoParam)
+	encodedFilename := url.QueryEscape(file.FileName)
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideoParam, encodedFilename)
 	row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 		Text: "Streaming / Download",
 		URL:  streamURL,
@@ -182,10 +176,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
 	if err != nil {
-		return replyError(ctx, u, err)
+		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 	}
-
-	m.log.Sugar().Infof("User %d processed file '%s' (%s), link: %s", chatId, file.FileName, file.MimeType, streamURL)
 
 	return dispatcher.EndGroups
 }
