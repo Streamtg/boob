@@ -1,9 +1,9 @@
 package commands
 
 import (
+	"encoding/json"
 	"fmt"
-	"strings"
-	"sync"
+	"os"
 
 	"EverythingSuckz/fsb/config"
 	"EverythingSuckz/fsb/internal/utils"
@@ -14,34 +14,41 @@ import (
 	"github.com/celestix/gotgproto/storage"
 )
 
-type command struct {
-	log ext.Logger
+const blockedFile = "blocked_users.json"
+
+// Persistent block list
+var blockedUsers = make(map[int64]struct{})
+
+// Load blocked users from JSON
+func loadBlockedUsers() {
+	file, err := os.ReadFile(blockedFile)
+	if err != nil {
+		return
+	}
+	var ids []int64
+	if err := json.Unmarshal(file, &ids); err != nil {
+		return
+	}
+	for _, id := range ids {
+		blockedUsers[id] = struct{}{}
+	}
 }
 
-// ---- Blocklist en memoria ----
-var blockedUsers = struct {
-	sync.RWMutex
-	m map[int64]struct{}
-}{m: make(map[int64]struct{})}
+// Save blocked users to JSON
+func saveBlockedUsers() {
+	var ids []int64
+	for id := range blockedUsers {
+		ids = append(ids, id)
+	}
+	data, _ := json.Marshal(ids)
+	_ = os.WriteFile(blockedFile, data, 0644)
+}
 
-// Comprueba si un usuario puede usar el bot
+// Check if user is allowed
 func isUserAllowed(chatId int64) bool {
-	blockedUsers.RLock()
-	_, blocked := blockedUsers.m[chatId]
-	blockedUsers.RUnlock()
-	if blocked {
+	if _, blocked := blockedUsers[chatId]; blocked {
 		return false
 	}
-
-	if len(config.ValueOf.AllowedUsers) != 0 {
-		return utils.Contains(config.ValueOf.AllowedUsers, chatId)
-	}
-
-	return true
-}
-
-// Comprobación de admin para /block y /unblock
-func adminAllowed(chatId int64) bool {
 	if len(config.ValueOf.AllowedUsers) != 0 {
 		return utils.Contains(config.ValueOf.AllowedUsers, chatId)
 	}
@@ -50,20 +57,19 @@ func adminAllowed(chatId int64) bool {
 
 // ---- LoadStart ----
 func (m *command) LoadStart(dispatcher dispatcher.Dispatcher) {
-	log := m.log.Named("start")
-	defer log.Sugar().Info("Loaded")
+	loadBlockedUsers() // load blocked users on start
 
 	dispatcher.AddHandler(handlers.NewCommand("start", start))
 	dispatcher.AddHandler(handlers.NewCommand("block", blockCommand))
 	dispatcher.AddHandler(handlers.NewCommand("unblock", unblockCommand))
-	dispatcher.AddHandler(handlers.NewCommand("blocked", blockedListCommand))
+	dispatcher.AddHandler(handlers.NewMessage(nil, handleForwarded))
 }
 
 // ---- /start ----
 func start(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
-	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
-	if peerChatId.Type != int(storage.TypeUser) {
+	peer := ctx.PeerStorage.GetPeerById(chatId)
+	if peer.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
 
@@ -72,93 +78,66 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	msg := "Envía o reenvía cualquier tipo de archivo y recibirás un enlace de streaming y descarga.\n\n"
-	msg += "Canal oficial: @yoelbotsx\n"
-	msg += "Link válido por 24 horas ⏳\n"
-	msg += "📊 Usa /stats para ver estadísticas del bot"
+	msg := "Send or forward any type of file and you will get a streaming and download link.\n\n"
+	msg += "Official channel: @yoelbotsx\n"
+	msg += "Link valid for 24 hours ⏳\n"
+	msg += "📊 Use /stats to view bot statistics"
 
 	ctx.Reply(u, msg, nil)
 	return dispatcher.EndGroups
 }
 
-// ---- Comandos de blocklist ----
+// ---- /block ----
 func blockCommand(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
-	if !adminAllowed(chatId) {
-		ctx.Reply(u, "No tienes permisos para usar /block.", nil)
-		return dispatcher.EndGroups
-	}
-
-	args := strings.TrimSpace(u.ArgsStr())
-	if args == "" {
-		ctx.Reply(u, "Uso: /block <user_id>", nil)
-		return dispatcher.EndGroups
-	}
-
-	var target int64
-	_, err := fmt.Sscan(args, &target)
-	if err != nil || target == 0 {
-		ctx.Reply(u, "ID inválida. Uso: /block <user_id>", nil)
-		return dispatcher.EndGroups
-	}
-
-	blockedUsers.Lock()
-	blockedUsers.m[target] = struct{}{}
-	blockedUsers.Unlock()
-
-	ctx.Reply(u, fmt.Sprintf("Usuario %d bloqueado ✅", target), nil)
+	ctx.Reply(u, "Please forward a message from the user you want to block.", nil)
+	ctx.Session().Set("next_block", true)
+	ctx.Session().Set("requester", chatId)
 	return dispatcher.EndGroups
 }
 
+// ---- /unblock ----
 func unblockCommand(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
-	if !adminAllowed(chatId) {
-		ctx.Reply(u, "No tienes permisos para usar /unblock.", nil)
-		return dispatcher.EndGroups
-	}
-
-	args := strings.TrimSpace(u.ArgsStr())
-	if args == "" {
-		ctx.Reply(u, "Uso: /unblock <user_id>", nil)
-		return dispatcher.EndGroups
-	}
-
-	var target int64
-	_, err := fmt.Sscan(args, &target)
-	if err != nil || target == 0 {
-		ctx.Reply(u, "ID inválida. Uso: /unblock <user_id>", nil)
-		return dispatcher.EndGroups
-	}
-
-	blockedUsers.Lock()
-	delete(blockedUsers.m, target)
-	blockedUsers.Unlock()
-
-	ctx.Reply(u, fmt.Sprintf("Usuario %d desbloqueado ✅", target), nil)
+	ctx.Reply(u, "Please forward a message from the user you want to unblock.", nil)
+	ctx.Session().Set("next_unblock", true)
+	ctx.Session().Set("requester", chatId)
 	return dispatcher.EndGroups
 }
 
-func blockedListCommand(ctx *ext.Context, u *ext.Update) error {
-	chatId := u.EffectiveChat().GetID()
-	if !adminAllowed(chatId) {
-		ctx.Reply(u, "No tienes permisos para usar /blocked.", nil)
+// ---- Handler for forwarded messages ----
+func handleForwarded(ctx *ext.Context, u *ext.Update) error {
+	s := ctx.Session()
+
+	// Block user
+	if nextBlock, _ := s.Get("next_block").(bool); nextBlock {
+		if u.EffectiveMessage.ForwardFrom != nil {
+			target := u.EffectiveMessage.ForwardFrom.GetID()
+			blockedUsers[target] = struct{}{}
+			saveBlockedUsers()
+			ctx.Reply(u, fmt.Sprintf("User %d blocked ✅", target), nil)
+			s.Delete("next_block")
+			s.Delete("requester")
+			return dispatcher.EndGroups
+		}
+		ctx.Reply(u, "You must forward a valid message from the user to block.", nil)
 		return dispatcher.EndGroups
 	}
 
-	blockedUsers.RLock()
-	if len(blockedUsers.m) == 0 {
-		blockedUsers.RUnlock()
-		ctx.Reply(u, "No hay usuarios bloqueados.", nil)
+	// Unblock user
+	if nextUnblock, _ := s.Get("next_unblock").(bool); nextUnblock {
+		if u.EffectiveMessage.ForwardFrom != nil {
+			target := u.EffectiveMessage.ForwardFrom.GetID()
+			delete(blockedUsers, target)
+			saveBlockedUsers()
+			ctx.Reply(u, fmt.Sprintf("User %d unblocked ✅", target), nil)
+			s.Delete("next_unblock")
+			s.Delete("requester")
+			return dispatcher.EndGroups
+		}
+		ctx.Reply(u, "You must forward a valid message from the user to unblock.", nil)
 		return dispatcher.EndGroups
 	}
 
-	var b strings.Builder
-	b.WriteString("Usuarios bloqueados:\n")
-	for id := range blockedUsers.m {
-		fmt.Fprintf(&b, "- %d\n", id)
-	}
-	blockedUsers.RUnlock()
-
-	ctx.Reply(u, b.String(), nil)
-	return dispatcher.EndGroups
+	return dispatcher.ContinueGroups
 }
