@@ -1,3 +1,129 @@
+package commands
+
+import (
+	"fmt"
+	"net/url"
+	"strings"
+
+	"EverythingSuckz/fsb/config"
+	"EverythingSuckz/fsb/internal/cache"
+	"EverythingSuckz/fsb/internal/utils"
+
+	"github.com/celestix/gotgproto/dispatcher"
+	"github.com/celestix/gotgproto/dispatcher/handlers"
+	"github.com/celestix/gotgproto/ext"
+	"github.com/celestix/gotgproto/storage"
+	"github.com/celestix/gotgproto/types"
+	"github.com/gotd/td/tg"
+)
+
+// ---------------------------
+// Registro de comando
+// ---------------------------
+func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
+	defer m.log.Sugar().Info("Loaded")
+	dispatcher.AddHandler(
+		handlers.NewMessage(nil, sendLink),
+	)
+}
+
+// ---------------------------
+// Filtrado de medios soportados
+// ---------------------------
+func supportedMediaFilter(m *types.Message) (bool, error) {
+	if m.Media == nil {
+		return false, dispatcher.EndGroups
+	}
+	switch m.Media.(type) {
+	case *tg.MessageMediaDocument:
+		return true, nil
+	case *tg.MessageMediaPhoto:
+		return true, nil
+	case tg.MessageMediaClass:
+		return false, dispatcher.EndGroups
+	default:
+		return false, nil
+	}
+}
+
+// ---------------------------
+// Tamaño legible
+// ---------------------------
+func formatFileSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
+	default:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
+	}
+}
+
+// ---------------------------
+// Emoji según tipo de archivo
+// ---------------------------
+func fileTypeEmoji(mime string) string {
+	lowerMime := strings.ToLower(mime)
+	switch {
+	case strings.Contains(lowerMime, "video"):
+		return "🎬"
+	case strings.Contains(lowerMime, "image"):
+		return "🖼️"
+	case strings.Contains(lowerMime, "audio"):
+		return "🎵"
+	case strings.Contains(lowerMime, "pdf"):
+		return "📕"
+	case strings.Contains(lowerMime, "zip"), strings.Contains(lowerMime, "rar"):
+		return "🗜️"
+	case strings.Contains(lowerMime, "text"):
+		return "📝"
+	case strings.Contains(lowerMime, "word"), strings.Contains(lowerMime, "excel"), strings.Contains(lowerMime, "powerpoint"):
+		return "📄"
+	case strings.Contains(lowerMime, "epub"):
+		return "📚"
+	default:
+		return "📄"
+	}
+}
+
+// ---------------------------
+// Sanitiza nombres de archivo
+// ---------------------------
+func sanitizeFileName(name string) string {
+	name = strings.ReplaceAll(name, " ", "_")
+	name = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`\/:*?"<>|`, r) {
+			return -1
+		}
+		return r
+	}, name)
+	return name
+}
+
+// ---------------------------
+// Previsualización placeholder
+// ---------------------------
+func generatePreview(file interface{}) string {
+	// Placeholder seguro para futuras mejoras
+	return ""
+}
+
+// ---------------------------
+// Verificación de seguridad placeholder
+// ---------------------------
+func isFileSafe(file interface{}) bool {
+	return true
+}
+
+// ---------------------------
+// Función principal de envío de link
+// ---------------------------
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
