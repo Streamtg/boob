@@ -60,19 +60,24 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// Función para obtener el nombre del usuario desde PeerStorage
-func getUserName(ctx *ext.Context, userID int64) string {
-	peer := ctx.PeerStorage.GetPeerById(userID)
-	if peer != nil && peer.Name != "" {
-		return peer.Name
+// Función para obtener el ID y nombre del usuario que envió el mensaje
+func getSenderInfo(ctx *ext.Context, from tg.PeerClass) (int64, string) {
+	switch v := from.(type) {
+	case *tg.PeerUser:
+		peer := ctx.PeerStorage.GetPeerById(v.UserID)
+		if peer != nil && peer.Username != "" {
+			return v.UserID, peer.Username
+		}
+		return v.UserID, fmt.Sprintf("User %d", v.UserID)
+	default:
+		return 0, "Unknown"
 	}
-	return fmt.Sprintf("User %d", userID)
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
-	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
-	if peerChatId.Type != int(storage.TypeUser) {
+	peerChat := ctx.PeerStorage.GetPeerById(chatId)
+	if peerChat == nil || peerChat.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
 
@@ -107,24 +112,21 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// ----- REENVÍO AL LOG CHANNEL CON INFORMACIÓN DEL USUARIO -----
-	var senderID int64
-	if u.EffectiveMessage.FromID != nil {
-		senderID = u.EffectiveMessage.FromID.PeerID()
-	} else {
-		senderID = chatId
-	}
-	senderName := getUserName(ctx, senderID)
-	logMessage := fmt.Sprintf("📤 Enviado por: %s (ID: %d)", senderName, senderID)
+	// Obtener información del remitente de manera segura
+	senderID, senderName := getSenderInfo(ctx, u.EffectiveMessage.FromID)
 
+	// Reenviar mensaje al log channel
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error al enviar al log channel - %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Enviar mensaje de info al log channel usando ctx.ReplyToChannel
-	_, _ = ctx.ReplyToChannel(config.ValueOf.LogChannelID, logMessage)
+	// Enviar info del usuario en el log channel
+	infoMessage := fmt.Sprintf("📤 Enviado por: %s (ID: %d)", senderName, senderID)
+	_, _ = ctx.Reply(u, infoMessage, &ext.ReplyOpts{
+		ReplyToMessageId: u.EffectiveMessage.ID,
+	})
 
 	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
