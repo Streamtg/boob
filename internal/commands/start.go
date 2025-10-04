@@ -17,16 +17,28 @@ func (m *command) LoadStart(dispatcher dispatcher.Dispatcher) {
 }
 
 func start(ctx *ext.Context, u *ext.Update) error {
-	chatId := u.EffectiveChat().GetID()
-	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
-	if peerChatId.Type != int(storage.TypeUser) {
+	chatID := u.EffectiveChat().GetID()
+	peer := ctx.PeerStorage.GetPeerById(chatID)
+
+	// Solo permitir usuarios tipo "user"
+	if peer.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
-	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
+
+	// Filtrado de usuarios permitidos
+	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatID) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
-	ctx.Reply(u, "Need a direct streamable link to a file? Send it my way! 🤓\n\nJoin my Update Channel @haris_garage 🗿 for more updates.\n\nLink validity: 24 hours ⏳\n\nPro Tip: Use 1DM Browser for lightning-fast downloads! 🔥\n\n📊 Use /stats to view bot statistics", nil)
+	// Mensaje de bienvenida en inglés
+	welcomeMessage := "📢 Hello!\n\n" +
+		"Send or forward any file to me, and I will provide a streaming and download link.\n\n" +
+		"Join my official update channel: @yoelbotsx\n\n" +
+		"Link validity: 24 hours ⏳\n" +
+		"Pro Tip: Use a fast browser for lightning-fast downloads! 🔥\n\n" +
+		"Use /stats to view bot statistics."
+
+	ctx.Reply(u, welcomeMessage, nil)
 	return dispatcher.EndGroups
 }
