@@ -18,7 +18,7 @@ import (
 )
 
 // ---------------------------
-// Función principal existente
+// Registro de comando
 // ---------------------------
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	defer m.log.Sugar().Info("Loaded")
@@ -47,7 +47,7 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 }
 
 // ---------------------------
-// Conversión de tamaño de bytes
+// Tamaño legible
 // ---------------------------
 func formatFileSize(bytes int64) string {
 	const (
@@ -93,7 +93,7 @@ func fileTypeEmoji(mime string) string {
 }
 
 // ---------------------------
-// Sanitización de nombres de archivo
+// Sanitiza nombres de archivo
 // ---------------------------
 func sanitizeFileName(name string) string {
 	name = strings.ReplaceAll(name, " ", "_")
@@ -110,21 +110,12 @@ func sanitizeFileName(name string) string {
 // Previsualización placeholder
 // ---------------------------
 func generatePreview(file interface{}) string {
-	// Solo placeholder: podrías mejorar con thumbnails reales
-	switch f := file.(type) {
-	case *utils.FileFromMediaReturnType: // Reemplaza con tu tipo real de retorno
-		lowerMime := strings.ToLower(f.MimeType)
-		if strings.Contains(lowerMime, "image") {
-			return "🖼️ Preview: [Image]"
-		} else if strings.Contains(lowerMime, "video") {
-			return "🎬 Preview: [Video]"
-		}
-	}
+	// Placeholder seguro
 	return ""
 }
 
 // ---------------------------
-// Seguridad placeholder
+// Verificación de seguridad placeholder
 // ---------------------------
 func isFileSafe(file interface{}) bool {
 	return true
@@ -185,7 +176,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Detectar nombre y formato si no está presente
 	if file.FileName == "" {
 		var ext string
 		lowerMime := strings.ToLower(file.MimeType)
