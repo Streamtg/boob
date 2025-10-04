@@ -74,7 +74,8 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-func toItalic(text string) string {
+// Convierte texto a cursiva Unicode sin usar símbolos
+func toItalicUnicode(text string) string {
 	var result strings.Builder
 	for _, r := range text {
 		switch {
@@ -143,12 +144,12 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		file.FileName = "unknown"
 	}
 
-	// Mensaje profesional con alineación clara
+	// Construcción del mensaje
 	message := fmt.Sprintf(
-		"%s File Name: %s\n%s File Type: %s\n%s File Size: %s\n\n⚠️ Sending or forwarding child abuse content will result in ban and report\n\n⏳ @yoelbots",
-		fileTypeEmoji(file.MimeType), toItalic(file.FileName),
-		fileTypeEmoji(file.MimeType), toItalic(file.MimeType),
-		fileTypeEmoji(file.MimeType), toItalic(formatFileSize(file.FileSize)),
+		"%s 𝑁𝑎𝑚𝑒: %s\n%s 𝑇𝑦𝑝𝑒: %s\n%s 𝑆𝑖𝑧𝑒: %s\n\n⚠️ 𝑆𝑒𝑛𝑑𝑖𝑛𝑔 𝑜𝑟 𝑓𝑜𝑟𝑤𝑎𝑟𝑑𝑖𝑛𝑔 𝑐ℎ𝑖𝑙𝑑 𝑎𝑏𝑢𝑠𝑒 𝑐𝑜𝑛𝑡𝑒𝑛𝑡 𝑤𝑖𝑙𝑙 𝑟𝑒𝑠𝑢𝑙𝑡 𝑖𝑛 𝑏𝑎𝑛 𝑎𝑛𝑑 𝑟𝑒𝑝𝑜𝑟𝑡\n\n⏳ @yoelbots",
+		fileTypeEmoji(file.MimeType), toItalicUnicode(file.FileName),
+		fileTypeEmoji(file.MimeType), toItalicUnicode(file.MimeType),
+		fileTypeEmoji(file.MimeType), toItalicUnicode(formatFileSize(file.FileSize)),
 	)
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
