@@ -111,8 +111,7 @@ func sanitizeFileName(name string) string {
 // ---------------------------
 // Función para previsualizar imágenes o videos
 // ---------------------------
-func generatePreview(file *tg.File) string {
-	// Solo placeholder, en producción aquí iría integración con miniaturas
+func generatePreview(file *utils.File) string {
 	lowerMime := strings.ToLower(file.MimeType)
 	switch {
 	case strings.Contains(lowerMime, "image"):
@@ -127,9 +126,8 @@ func generatePreview(file *tg.File) string {
 // ---------------------------
 // Función de seguridad: comprobar archivo
 // ---------------------------
-func isFileSafe(file *tg.File) bool {
+func isFileSafe(file *utils.File) bool {
 	// Placeholder: aquí podrías integrar VirusTotal API u otro escáner
-	// Devuelve true por defecto
 	return true
 }
 
@@ -246,7 +244,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
-		preview + safeMessage,
+		preview+safeMessage,
 	)
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
