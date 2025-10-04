@@ -145,7 +145,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	// Mensaje profesional con alineación clara
 	message := fmt.Sprintf(
-		"%s *File Name:* %s\n%s *File Type:* %s\n%s *File Size:* %s\n\n⚠️ *Sending or forwarding child abuse content will result in ban and report*\n\n⏳ _@yoelbots_",
+		"%s File Name: %s\n%s File Type: %s\n%s File Size: %s\n\n⚠️ Sending or forwarding child abuse content will result in ban and report\n\n⏳ @yoelbots",
 		fileTypeEmoji(file.MimeType), toItalic(file.FileName),
 		fileTypeEmoji(file.MimeType), toItalic(file.MimeType),
 		fileTypeEmoji(file.MimeType), toItalic(formatFileSize(file.FileSize)),
