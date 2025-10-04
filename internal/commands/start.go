@@ -31,16 +31,32 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje de bienvenida en inglés con negrita y cursiva usando caracteres Markdown
-	welcomeMessage := "*📢 Send or Forward any file*\n\n" +
-		"_I will generate a link for direct download or streaming if it's multimedia._\n\n" +
-		"_Supports videos, documents, images, rar/zip files, and other uncommon formats._\n" +
-		"_Playback may fail on some formats, so it is recommended to open links in Chrome._\n\n" +
-		"*Official Update Channel:* @yoelbotsx\n\n" +
-		"*Use /stats to view bot statistics.*"
+	// Mensaje de bienvenida en inglés, con diseño tipo bloque y emojis
+	welcomeMessage := `
+┌─────────────────────────────┐
+│ 📤 SEND OR FORWARD ANY FILE │
+└─────────────────────────────┘
 
-	// Envía el mensaje sin especificar ParseMode
+➡️ I WILL GENERATE A LINK FOR:
+   • DIRECT DOWNLOAD
+   • STREAMING (if multimedia)
+
+┌─────────── SUPPORTED FILES ──────────┐
+│ 🎬 Videos                           │
+│ 🖼️ Images                           │
+│ 📄 Documents                        │
+│ 🗜️ RAR/ZIP & other uncommon formats │
+└──────────────────────────────────────┘
+
+⚠️ NOTE:
+• Playback may fail on some formats
+• Recommended: open links in Chrome
+
+🔔 OFFICIAL UPDATE CHANNEL: @yoelbotsx
+
+📊 Use /stats to view bot statistics
+`
+
 	ctx.Reply(u, welcomeMessage, nil)
-
 	return dispatcher.EndGroups
 }
