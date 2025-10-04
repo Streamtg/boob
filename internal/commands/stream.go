@@ -76,20 +76,6 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
-// Extrae ID y nombre del usuario de manera segura
-func getSenderInfo(ctx *ext.Context, from tg.PeerClass) (int64, string) {
-	switch v := from.(type) {
-	case *tg.PeerUser:
-		peer := ctx.PeerStorage.GetPeerById(v.UserID)
-		if peer != nil && peer.Username != "" {
-			return v.UserID, peer.Username
-		}
-		return v.UserID, fmt.Sprintf("User %d", v.UserID)
-	default:
-		return 0, "Unknown"
-	}
-}
-
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChat := ctx.PeerStorage.GetPeerById(chatId)
@@ -128,23 +114,13 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Obtener información del remitente
-	senderID, senderName := getSenderInfo(ctx, u.EffectiveMessage.FromID)
-
-	// Reenviar mensaje al log channel
+	// Reenvío del mensaje al log channel
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error al enviar al log channel - %s", err.Error()), nil)
+		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Enviar info del usuario al log channel (solo visible ahí)
-	logMessage := fmt.Sprintf("📤 Contenido enviado por: %s (ID: %d)", senderName, senderID)
-	_, _ = ctx.Reply(u, logMessage, &ext.ReplyOpts{
-		ReplyToMessageId: update.Updates[0].(*tg.UpdateMessageID).ID,
-	})
-
-	// Obtener el archivo/media reenviado
 	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	file, err := utils.FileFromMedia(doc)
@@ -183,7 +159,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	})
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	// Responder al usuario sin revelar su identidad
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		NoWebpage:        false,
