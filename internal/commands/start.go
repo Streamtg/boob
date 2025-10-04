@@ -1,6 +1,9 @@
 package commands
 
 import (
+	"fmt"
+	"net/url"
+
 	"EverythingSuckz/fsb/config"
 	"EverythingSuckz/fsb/internal/utils"
 
@@ -8,25 +11,98 @@ import (
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/storage"
+	"github.com/gotd/td/tg"
 )
+
+// Mensajes de bienvenida por idioma
+var welcomeMessages = map[string]string{
+	"en": "Welcome! 🤓 Send me or forward any type of file and I'll give you a direct streamable link!\n\nJoin my official channel @yoelbotsx for updates 🗿",
+	"zh": "欢迎！🤓 发送或转发任何类型的文件，我会为您生成直接的流媒体链接！\n\n加入我的官方频道 @yoelbotsx 获取更新 🗿",
+	"hi": "स्वागत है! 🤓 मुझे किसी भी प्रकार की फ़ाइल भेजें या फॉरवर्ड करें और मैं आपको सीधे स्ट्रीम/डाउनलोड लिंक दूँगा!\n\nअपडेट के लिए मेरे आधिकारिक चैनल @yoelbotsx से जुड़ें 🗿",
+	"es": "¡Bienvenido! 🤓 Envíame o reenvíame cualquier tipo de archivo y te daré un enlace directo para streaming y descarga.\n\nÚnete a mi canal oficial @yoelbotsx para actualizaciones 🗿",
+	"fr": "Bienvenue ! 🤓 Envoyez-moi ou transférez tout type de fichier et je vous fournirai un lien de streaming direct !\n\nRejoignez mon canal officiel @yoelbotsx pour les mises à jour 🗿",
+	"ar": "مرحبًا! 🤓 أرسل لي أو أعد توجيه أي نوع من الملفات وسأعطيك رابطًا مباشرًا للبث!\n\nانضم إلى قناتي الرسمية @yoelbotsx للحصول على التحديثات 🗿",
+	"bn": "স্বাগত! 🤓 আমাকে কোনো ফাইল পাঠান বা ফরওয়ার্ড করুন এবং আমি আপনাকে সরাসরি স্ট্রিমিং লিঙ্ক দেব!\n\nআপডেটের জন্য আমার অফিসিয়াল চ্যানেল @yoelbotsx এ যোগ দিন 🗿",
+	"ru": "Добро пожаловать! 🤓 Отправьте мне или перешлите любой файл, и я дам вам прямую ссылку для стриминга!\n\nПрисоединяйтесь к моему официальному каналу @yoelbotsx для обновлений 🗿",
+	"pt": "Bem-vindo! 🤓 Envie-me ou reencaminhe qualquer tipo de arquivo e eu lhe darei um link direto para streaming!\n\nJunte-se ao meu canal oficial @yoelbotsx para atualizações 🗿",
+	"ur": "خوش آمدید! 🤓 مجھے کوئی بھی فائل بھیجیں یا فارورڈ کریں اور میں آپ کو براہ راست اسٹریمنگ لنک دوں گا!\n\nاپڈیٹس کے لیے میرے آفیشل چینل @yoelbotsx سے جڑیں 🗿",
+}
+
+// Idiomas disponibles para botones
+var languages = []string{"English", "Mandarin", "Hindi", "Spanish", "French", "Arabic", "Bengali", "Russian", "Portuguese", "Urdu"}
 
 func (m *command) LoadStart(dispatcher dispatcher.Dispatcher) {
 	log := m.log.Named("start")
 	defer log.Sugar().Info("Loaded")
 	dispatcher.AddHandler(handlers.NewCommand("start", start))
+	dispatcher.AddHandler(handlers.NewMessage(nil, handleFile))
 }
 
 func start(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
-	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
-	if peerChatId.Type != int(storage.TypeUser) {
+	peerChat := ctx.PeerStorage.GetPeerById(chatId)
+	if peerChat == nil || peerChat.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
+
+	// Detectar idioma del usuario
+	userLang := "en" // Por defecto inglés
+	if u.EffectiveMessage.From != nil && u.EffectiveMessage.From.LanguageCode != "" {
+		if _, ok := welcomeMessages[u.EffectiveMessage.From.LanguageCode]; ok {
+			userLang = u.EffectiveMessage.From.LanguageCode
+		}
+	}
+
+	message := welcomeMessages[userLang]
+
+	// Teclado para selección de idioma
+	var rows []tg.KeyboardButtonRow
+	langRow := tg.KeyboardButtonRow{}
+	for _, lang := range languages {
+		langRow.Buttons = append(langRow.Buttons, &tg.KeyboardButton{Text: lang})
+	}
+	rows = append(rows, langRow)
+
+	markup := &tg.ReplyInlineMarkup{Rows: rows}
+	ctx.Reply(u, message, &ext.ReplyOpts{Markup: markup})
+	return dispatcher.EndGroups
+}
+
+// Manejo de cualquier archivo enviado
+func handleFile(ctx *ext.Context, u *ext.Update) error {
+	chatId := u.EffectiveChat().GetID()
+
+	// Verificar usuario permitido
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
-	ctx.Reply(u, "Need a direct streamable link to a file? Send it my way! 🤓\n\nJoin my Update Channel @haris_garage 🗿 for more updates.\n\nLink validity: 24 hours ⏳\n\nPro Tip: Use 1DM Browser for lightning-fast downloads! 🔥\n\n📊 Use /stats to view bot statistics", nil)
+	msg := u.EffectiveMessage
+	if msg.Media == nil {
+		ctx.Reply(u, "Please send a valid file.", nil)
+		return dispatcher.EndGroups
+	}
+
+	// Reenviar al canal oficial
+	update, err := utils.ForwardMessages(ctx, chatId, "@yoelbotsx", msg.ID)
+	if err != nil {
+		ctx.Reply(u, fmt.Sprintf("Error forwarding: %s", err.Error()), nil)
+		return dispatcher.EndGroups
+	}
+
+	// Generar enlace de streaming / descarga
+	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
+	fileName := "file"
+	if msg.Document != nil && msg.Document.FileName != "" {
+		fileName = msg.Document.FileName
+	}
+
+	videoParam := fmt.Sprintf("%d", messageID)
+	encodedVideo := url.QueryEscape(videoParam)
+	encodedFilename := url.QueryEscape(fileName)
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideo, encodedFilename)
+
+	ctx.Reply(u, fmt.Sprintf("Your streaming/download link is ready:\n%s", streamURL), nil)
 	return dispatcher.EndGroups
 }
