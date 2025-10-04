@@ -8,7 +8,6 @@ import (
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/storage"
-	"github.com/celestix/gotgproto/types"
 )
 
 func (m *command) LoadStart(dispatcher dispatcher.Dispatcher) {
@@ -32,50 +31,25 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje principal
-	welcomeMessage := `
-╔══════════════════════════════════╗
-║          📤 WELCOME TO FS-BOT          ║
-╠══════════════════════════════════╣
-║ SEND OR FORWARD ANY FILE          ║
-║ I WILL GENERATE A LINK FOR:      ║
-║  • Direct Download               ║
-║  • Streaming (if multimedia)     ║
-╠════════════ SUPPORTED FILES ══════╣
-║ 🎬 Videos                         ║
-║ 🖼️ Images                         ║
-║ 📄 Documents                      ║
-║ 🗜️ RAR/ZIP & other formats        ║
-╠══════════════════════════════════╣
-║ ⚠️ NOTE:                            ║
-║ • Playback may fail on some files ║
-║ • Recommended: open links in Chrome ║
-╚══════════════════════════════════╝
-`
+	// Mensaje principal en inglés (solo texto, negrita y cursiva usando MarkdownV2)
+	welcomeMessage := `*📤 WELCOME TO FS-BOT*
+_Send or forward any file and I will generate a link for:_
+- Direct Download
+- Streaming (if multimedia)
 
-	// Botones inline
-	inlineKeyboard := [][]types.KeyboardButtonClass{
-		{
-			types.KeyboardButton{
-				Text: "📺 Channel Updates",
-				URL:  "@yoelbotsx",
-			},
-			types.KeyboardButton{
-				Text: "📊 Bot Stats",
-				URL:  "https://t.me/yoelbotsx?start=stats",
-			},
-		},
-		{
-			types.KeyboardButton{
-				Text: "💬 Support",
-				URL:  "https://t.me/yoelbotsx",
-			},
-		},
-	}
+*Supported files:*
+🎬 Videos
+🖼️ Images
+📄 Documents
+🗜️ RAR/ZIP & other formats
 
-	ctx.Reply(u, welcomeMessage, &ext.ReplyOpts{
-		InlineKeyboard: inlineKeyboard,
-	})
+⚠️ *Note:*
+- Playback may fail on some files
+- Recommended: open links in Chrome
+
+_Channel updates: @yoelbotsx_`
+
+	ctx.Reply(u, welcomeMessage, nil)
 
 	return dispatcher.EndGroups
 }
