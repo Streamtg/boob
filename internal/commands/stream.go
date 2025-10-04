@@ -146,7 +146,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	// Construcción del mensaje
 	message := fmt.Sprintf(
-		"%s 𝑁𝑎𝑚𝑒: %s\n%s 𝑇𝑦𝑝𝑒: %s\n%s 𝑆𝑖𝑧𝑒: %s\n\n⚠️ 𝑆𝑒𝑛𝑑𝑖𝑛𝑔 𝑜𝑟 𝑓𝑜𝑟𝑤𝑎𝑟𝑑𝑖𝑛𝑔 𝑐ℎ𝑖𝑙𝑑 𝑎𝑏𝑢𝑠𝑒 𝑐𝑜𝑛𝑡𝑒𝑛𝑡 𝑤𝑖𝑙𝑙 𝑟𝑒𝑠𝑢𝑙𝑡 𝑖𝑛 𝑏𝑎𝑛 𝑎𝑛𝑑 𝑟𝑒𝑝𝑜𝑟𝑡\n\n⏳ @yoelbots",
+		"%s 𝑁𝑎𝑚𝑒: %s\n%s 𝑇𝑦𝑝𝑒: %s\n%s 𝑆𝑖𝑧𝑒: %s\n\n⚠️ 𝑆𝑒𝑛𝑑𝑖𝑛𝑔 𝑜𝑟 𝑓𝑜𝑟𝑤𝑎𝑟𝑑𝑖𝑛𝑔 𝑐ℎ𝑖𝑙𝑑 𝑎𝑏𝑢𝑠𝑒 𝑐𝑜𝑛𝑡𝑒𝑛𝑡 𝑤𝑖𝑙𝑙 𝑟𝑒𝑠𝑢𝑙𝑡 𝑖𝑛 𝑏𝑎𝑛 𝑎𝑛𝑑 𝑟𝑒𝑝𝑜𝑟𝑡\n\n⏳ @yoelbotsx",
 		fileTypeEmoji(file.MimeType), toItalicUnicode(file.FileName),
 		fileTypeEmoji(file.MimeType), toItalicUnicode(file.MimeType),
 		fileTypeEmoji(file.MimeType), toItalicUnicode(formatFileSize(file.FileSize)),
