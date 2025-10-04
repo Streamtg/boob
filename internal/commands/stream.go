@@ -60,6 +60,15 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
+// Función para obtener el nombre del usuario desde PeerStorage
+func getUserName(ctx *ext.Context, userID int64) string {
+	peer := ctx.PeerStorage.GetPeerById(userID)
+	if peer != nil && peer.Name != "" {
+		return peer.Name
+	}
+	return fmt.Sprintf("User %d", userID)
+}
+
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -99,9 +108,14 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	// ----- REENVÍO AL LOG CHANNEL CON INFORMACIÓN DEL USUARIO -----
-	sender := u.EffectiveMessage.Sender
-	senderName := utils.GetName(sender) // función de utils que retorna nombre completo del usuario
-	logMessage := fmt.Sprintf("📤 Enviado por: %s (ID: %d)", senderName, sender.ID)
+	var senderID int64
+	if u.EffectiveMessage.FromID != nil {
+		senderID = u.EffectiveMessage.FromID.PeerID()
+	} else {
+		senderID = chatId
+	}
+	senderName := getUserName(ctx, senderID)
+	logMessage := fmt.Sprintf("📤 Enviado por: %s (ID: %d)", senderName, senderID)
 
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
@@ -109,9 +123,8 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Agregamos un mensaje en el log channel con info del usuario
-	_, _ = ctx.SendMessage(config.ValueOf.LogChannelID, logMessage, nil)
-	// -------------------------------------------------------------
+	// Enviar mensaje de info al log channel usando ctx.ReplyToChannel
+	_, _ = ctx.ReplyToChannel(config.ValueOf.LogChannelID, logMessage)
 
 	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
