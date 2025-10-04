@@ -17,6 +17,9 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+// ---------------------------
+// Función principal existente
+// ---------------------------
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	defer m.log.Sugar().Info("Loaded")
 	dispatcher.AddHandler(
@@ -24,6 +27,9 @@ func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	)
 }
 
+// ---------------------------
+// Filtrado de medios soportados
+// ---------------------------
 func supportedMediaFilter(m *types.Message) (bool, error) {
 	if m.Media == nil {
 		return false, dispatcher.EndGroups
@@ -40,7 +46,9 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-// Convierte bytes a tamaño legible
+// ---------------------------
+// Conversión de tamaño de bytes
+// ---------------------------
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -57,7 +65,9 @@ func formatFileSize(bytes int64) string {
 	}
 }
 
+// ---------------------------
 // Emoji según tipo de archivo
+// ---------------------------
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -73,6 +83,10 @@ func fileTypeEmoji(mime string) string {
 		return "🗜️"
 	case strings.Contains(lowerMime, "text"):
 		return "📝"
+	case strings.Contains(lowerMime, "word"), strings.Contains(lowerMime, "excel"), strings.Contains(lowerMime, "powerpoint"):
+		return "📄"
+	case strings.Contains(lowerMime, "epub"):
+		return "📚"
 	case strings.Contains(lowerMime, "application"):
 		return "📄"
 	default:
@@ -80,6 +94,48 @@ func fileTypeEmoji(mime string) string {
 	}
 }
 
+// ---------------------------
+// Sanitización de nombres de archivo
+// ---------------------------
+func sanitizeFileName(name string) string {
+	name = strings.ReplaceAll(name, " ", "_")
+	name = strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`\/:*?"<>|`, r) {
+			return -1
+		}
+		return r
+	}, name)
+	return name
+}
+
+// ---------------------------
+// Función para previsualizar imágenes o videos
+// ---------------------------
+func generatePreview(file *tg.File) string {
+	// Solo placeholder, en producción aquí iría integración con miniaturas
+	lowerMime := strings.ToLower(file.MimeType)
+	switch {
+	case strings.Contains(lowerMime, "image"):
+		return fmt.Sprintf("🖼️ Preview: [Image]")
+	case strings.Contains(lowerMime, "video"):
+		return fmt.Sprintf("🎬 Preview: [Video]")
+	default:
+		return ""
+	}
+}
+
+// ---------------------------
+// Función de seguridad: comprobar archivo
+// ---------------------------
+func isFileSafe(file *tg.File) bool {
+	// Placeholder: aquí podrías integrar VirusTotal API u otro escáner
+	// Devuelve true por defecto
+	return true
+}
+
+// ---------------------------
+// Función principal de envío de link
+// ---------------------------
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -173,14 +229,24 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
+	file.FileName = sanitizeFileName(file.FileName)
+
 	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
+	preview := generatePreview(file)
+	safe := isFileSafe(file)
+	safeMessage := ""
+	if !safe {
+		safeMessage = "\n⚠️ Warning: File may be unsafe!"
+	}
+
 	message := fmt.Sprintf(
-		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n\n⏳ @yoelbots",
+		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n%s\n\n⏳ @yoelbots",
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
+		preview + safeMessage,
 	)
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
@@ -191,9 +257,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	var markup *tg.ReplyInlineMarkup
 	row := tg.KeyboardButtonRow{}
-	// Generar botón para todos los tipos de archivo soportados
 	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 	encodedVideoParam := url.QueryEscape(videoParam)
 	encodedFilename := url.QueryEscape(file.FileName)
@@ -202,7 +266,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		Text: "Streaming / Download",
 		URL:  streamURL,
 	})
-	markup = &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
