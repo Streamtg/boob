@@ -27,29 +27,26 @@ func start(ctx *ext.Context, u *ext.Update) error {
 
 	// Filtrado de usuarios permitidos
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatID) {
-		ctx.Reply(u, "You are not allowed to use this bot.", nil)
+		ctx.Reply(u, "_You are not allowed to use this bot._", nil)
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje principal en inglés (solo texto, negrita y cursiva usando MarkdownV2)
-	welcomeMessage := `*📤 WELCOME TO FS-BOT*
-_Send or forward any file and I will generate a link for:_
-- Direct Download
-- Streaming (if multimedia)
-
-*Supported files:*
-🎬 Videos
-🖼️ Images
-📄 Documents
-🗜️ RAR/ZIP & other formats
-
-⚠️ *Note:*
-- Playback may fail on some files
-- Recommended: open links in Chrome
-
-_Channel updates: @yoelbotsx_`
+	// Mensaje profesional en cursiva
+	welcomeMessage := `
+╔════════════════════════════════════╗
+║  ✨ 𝗦𝗘𝗡𝗗 𝗢𝗥 𝗙𝗢𝗥𝗪𝗔𝗥𝗗 𝗔𝗡𝗬 𝗙𝗜𝗟𝗘 ✨  ║
+╠════════════════════════════════════╣
+║ _I will generate a direct download link or streaming option for your multimedia files._ ║
+╠════════════════════════════════════╣
+║ _For videos, unusual formats, or rare files:_                                      ║
+║ _• Include the correct file extension_                                            ║
+║ _• Streaming may fail on some formats_                                           ║
+║ _• Recommended to open links in Chrome_                                         ║
+╠════════════════════════════════════╣
+║ _Official Channel: @yoelbotsx_                                                   ║
+╚════════════════════════════════════╝
+`
 
 	ctx.Reply(u, welcomeMessage, nil)
-
 	return dispatcher.EndGroups
 }
