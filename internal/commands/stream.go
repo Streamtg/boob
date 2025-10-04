@@ -110,7 +110,6 @@ func sanitizeFileName(name string) string {
 // Previsualización placeholder
 // ---------------------------
 func generatePreview(file interface{}) string {
-	// Placeholder seguro para futuras mejoras
 	return ""
 }
 
@@ -228,13 +227,45 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 
-	// Duración si es multimedia
+	// ---------------------------
+	// Duración directamente del Media
+	// ---------------------------
 	durationMsg := ""
-	if file.Duration > 0 {
-		hours := file.Duration / 3600
-		minutes := (file.Duration % 3600) / 60
-		seconds := file.Duration % 60
-
+	switch media := doc.(type) {
+	case *tg.MessageMediaDocument:
+		if video := media.Document.AsVideo(); video != nil {
+			hours := video.Duration / 3600
+			minutes := (video.Duration % 3600) / 60
+			seconds := video.Duration % 60
+			if hours > 0 {
+				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
+			} else {
+				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
+			}
+		}
+		if audio := media.Document.AsAudio(); audio != nil {
+			hours := audio.Duration / 3600
+			minutes := (audio.Duration % 3600) / 60
+			seconds := audio.Duration % 60
+			if hours > 0 {
+				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
+			} else {
+				durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
+			}
+		}
+	case *tg.MessageMediaVideo:
+		hours := media.Video.Duration / 3600
+		minutes := (media.Video.Duration % 3600) / 60
+		seconds := media.Video.Duration % 60
+		if hours > 0 {
+			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
+		} else {
+			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
+		}
+	case *tg.MessageMediaAudio:
+		hours := media.Audio.Duration / 3600
+		minutes := (media.Audio.Duration % 3600) / 60
+		seconds := media.Audio.Duration % 60
 		if hours > 0 {
 			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
 		} else {
