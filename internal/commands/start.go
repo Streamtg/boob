@@ -10,7 +10,6 @@ import (
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/storage"
-	"github.com/celestix/gotgproto/types"
 )
 
 // Mensajes de bienvenida en 10 idiomas
@@ -25,6 +24,14 @@ var welcomeMessages = map[string]string{
 	"ru": "Добро пожаловать! 🤓 Отправьте мне или перешлите любой файл, и я дам вам прямую ссылку для стриминга!\n\nПрисоединяйтесь к моему официальному каналу @yoelbotsx для обновлений 🗿",
 	"pt": "Bem-vindo! 🤓 Envie-me ou reencaminhe qualquer tipo de arquivo e eu lhe darei um link direto para streaming!\n\nJunte-se ao meu canal oficial @yoelbotsx para atualizações 🗿",
 	"ur": "خوش آمدید! 🤓 مجھے کوئی بھی فائل بھیجیں یا فارورڈ کریں اور میں آپ کو براہ راست اسٹریمنگ لنک دوں گا!\n\nاپڈیٹس کے لیے میرے آفیشل چینل @yoelbotsx سے جڑیں 🗿",
+}
+
+// Devuelve el mensaje de bienvenida según el idioma, por defecto inglés
+func getWelcomeMessage(langCode string) string {
+	if msg, ok := welcomeMessages[langCode]; ok {
+		return msg
+	}
+	return welcomeMessages["en"]
 }
 
 func (m *command) LoadStart(dispatcher dispatcher.Dispatcher) {
@@ -44,10 +51,19 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje por defecto en inglés
-	message := welcomeMessages["en"]
-	ctx.Reply(u, message, nil)
+	// Validar usuario permitido
+	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
+		ctx.Reply(u, "You are not allowed to use this bot.", nil)
+		return dispatcher.EndGroups
+	}
 
+	// Obtener idioma del usuario si está disponible
+	lang := "en"
+	if peer.LangCode != "" {
+		lang = peer.LangCode
+	}
+
+	ctx.Reply(u, getWelcomeMessage(lang), nil)
 	return dispatcher.EndGroups
 }
 
@@ -68,16 +84,15 @@ func handleFile(ctx *ext.Context, u *ext.Update) error {
 
 	// Reenviar al canal oficial (ID numérico en config)
 	logChannelID := config.ValueOf.LogChannelID
-	update, err := utils.ForwardMessages(ctx, chatId, logChannelID, msg.ID)
+	_, err := utils.ForwardMessages(ctx, chatId, logChannelID, msg.ID)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error forwarding: %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Generar enlace de streaming / descarga
-	messageID := update.Updates[0].(*types.UpdateMessageID).ID
-	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d", messageID)
-
+	// Generar enlace de streaming / descarga usando el ID del mensaje original
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d", msg.ID)
 	ctx.Reply(u, fmt.Sprintf("Your streaming/download link is ready:\n%s", streamURL), nil)
+
 	return dispatcher.EndGroups
 }
