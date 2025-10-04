@@ -1,129 +1,3 @@
-package commands
-
-import (
-	"fmt"
-	"net/url"
-	"strings"
-
-	"EverythingSuckz/fsb/config"
-	"EverythingSuckz/fsb/internal/cache"
-	"EverythingSuckz/fsb/internal/utils"
-
-	"github.com/celestix/gotgproto/dispatcher"
-	"github.com/celestix/gotgproto/dispatcher/handlers"
-	"github.com/celestix/gotgproto/ext"
-	"github.com/celestix/gotgproto/storage"
-	"github.com/celestix/gotgproto/types"
-	"github.com/gotd/td/tg"
-)
-
-// ---------------------------
-// Registro de comando
-// ---------------------------
-func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	defer m.log.Sugar().Info("Loaded")
-	dispatcher.AddHandler(
-		handlers.NewMessage(nil, sendLink),
-	)
-}
-
-// ---------------------------
-// Filtrado de medios soportados
-// ---------------------------
-func supportedMediaFilter(m *types.Message) (bool, error) {
-	if m.Media == nil {
-		return false, dispatcher.EndGroups
-	}
-	switch m.Media.(type) {
-	case *tg.MessageMediaDocument:
-		return true, nil
-	case *tg.MessageMediaPhoto:
-		return true, nil
-	case tg.MessageMediaClass:
-		return false, dispatcher.EndGroups
-	default:
-		return false, nil
-	}
-}
-
-// ---------------------------
-// Tamaño legible
-// ---------------------------
-func formatFileSize(bytes int64) string {
-	const (
-		KB = 1024
-		MB = 1024 * KB
-		GB = 1024 * MB
-	)
-	switch {
-	case bytes >= GB:
-		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
-	case bytes >= MB:
-		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
-	default:
-		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
-	}
-}
-
-// ---------------------------
-// Emoji según tipo de archivo
-// ---------------------------
-func fileTypeEmoji(mime string) string {
-	lowerMime := strings.ToLower(mime)
-	switch {
-	case strings.Contains(lowerMime, "video"):
-		return "🎬"
-	case strings.Contains(lowerMime, "image"):
-		return "🖼️"
-	case strings.Contains(lowerMime, "audio"):
-		return "🎵"
-	case strings.Contains(lowerMime, "pdf"):
-		return "📕"
-	case strings.Contains(lowerMime, "zip"), strings.Contains(lowerMime, "rar"):
-		return "🗜️"
-	case strings.Contains(lowerMime, "text"):
-		return "📝"
-	case strings.Contains(lowerMime, "word"), strings.Contains(lowerMime, "excel"), strings.Contains(lowerMime, "powerpoint"):
-		return "📄"
-	case strings.Contains(lowerMime, "epub"):
-		return "📚"
-	default:
-		return "📄"
-	}
-}
-
-// ---------------------------
-// Sanitiza nombres de archivo
-// ---------------------------
-func sanitizeFileName(name string) string {
-	name = strings.ReplaceAll(name, " ", "_")
-	name = strings.Map(func(r rune) rune {
-		if strings.ContainsRune(`\/:*?"<>|`, r) {
-			return -1
-		}
-		return r
-	}, name)
-	return name
-}
-
-// ---------------------------
-// Previsualización placeholder
-// ---------------------------
-func generatePreview(file interface{}) string {
-	// Placeholder seguro
-	return ""
-}
-
-// ---------------------------
-// Verificación de seguridad placeholder
-// ---------------------------
-func isFileSafe(file interface{}) bool {
-	return true
-}
-
-// ---------------------------
-// Función principal de envío de link
-// ---------------------------
 func sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 	peerChatId := ctx.PeerStorage.GetPeerById(chatId)
@@ -131,11 +5,13 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
+	// Validación de usuarios permitidos
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
+	// Validación de suscripción forzada
 	if config.ValueOf.ForceSubChannel != "" {
 		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
 		if err != nil || !isSubscribed {
@@ -153,6 +29,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
+	// Filtrado de medios soportados
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil {
 		return err
@@ -162,6 +39,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
+	// Forward al canal de logs
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
@@ -176,6 +54,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
+	// Detectar nombre y formato si no está presente
 	if file.FileName == "" {
 		var ext string
 		lowerMime := strings.ToLower(file.MimeType)
@@ -216,10 +95,28 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
+	// Sanitizar nombre
 	file.FileName = sanitizeFileName(file.FileName)
 
+	// Emoji y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
+
+	// Duración si es multimedia
+	durationMsg := ""
+	if file.Duration > 0 {
+		hours := file.Duration / 3600
+		minutes := (file.Duration % 3600) / 60
+		seconds := file.Duration % 60
+
+		if hours > 0 {
+			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, seconds)
+		} else {
+			durationMsg = fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, seconds)
+		}
+	}
+
+	// Previsualización y seguridad placeholders
 	preview := generatePreview(file)
 	safe := isFileSafe(file)
 	safeMessage := ""
@@ -227,22 +124,27 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		safeMessage = "\n⚠️ Warning: File may be unsafe!"
 	}
 
+	// Construir mensaje final
 	message := fmt.Sprintf(
-		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n%s\n\n⏳ @yoelbots",
+		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n%s\n%s\n\n⏳ @yoelbots",
 		emoji, file.FileName,
 		emoji, file.MimeType,
 		size,
+		durationMsg,
 		preview+safeMessage,
 	)
 
+	// Hash para streaming
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 
+	// Registrar estadísticas
 	statsCache := cache.GetStatsCache()
 	if statsCache != nil {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
+	// Crear botón de streaming/download
 	row := tg.KeyboardButtonRow{}
 	videoParam := fmt.Sprintf("%d?hash=%s", messageID, hash)
 	encodedVideoParam := url.QueryEscape(videoParam)
@@ -254,6 +156,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	})
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
+	// Enviar mensaje
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		NoWebpage:        false,
