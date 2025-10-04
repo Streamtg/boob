@@ -87,8 +87,6 @@ func fileTypeEmoji(mime string) string {
 		return "📄"
 	case strings.Contains(lowerMime, "epub"):
 		return "📚"
-	case strings.Contains(lowerMime, "application"):
-		return "📄"
 	default:
 		return "📄"
 	}
@@ -109,25 +107,26 @@ func sanitizeFileName(name string) string {
 }
 
 // ---------------------------
-// Función para previsualizar imágenes o videos
+// Previsualización placeholder
 // ---------------------------
-func generatePreview(file *utils.File) string {
-	lowerMime := strings.ToLower(file.MimeType)
-	switch {
-	case strings.Contains(lowerMime, "image"):
-		return fmt.Sprintf("🖼️ Preview: [Image]")
-	case strings.Contains(lowerMime, "video"):
-		return fmt.Sprintf("🎬 Preview: [Video]")
-	default:
-		return ""
+func generatePreview(file interface{}) string {
+	// Solo placeholder: podrías mejorar con thumbnails reales
+	switch f := file.(type) {
+	case *utils.FileFromMediaReturnType: // Reemplaza con tu tipo real de retorno
+		lowerMime := strings.ToLower(f.MimeType)
+		if strings.Contains(lowerMime, "image") {
+			return "🖼️ Preview: [Image]"
+		} else if strings.Contains(lowerMime, "video") {
+			return "🎬 Preview: [Video]"
+		}
 	}
+	return ""
 }
 
 // ---------------------------
-// Función de seguridad: comprobar archivo
+// Seguridad placeholder
 // ---------------------------
-func isFileSafe(file *utils.File) bool {
-	// Placeholder: aquí podrías integrar VirusTotal API u otro escáner
+func isFileSafe(file interface{}) bool {
 	return true
 }
 
@@ -229,7 +228,6 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	file.FileName = sanitizeFileName(file.FileName)
 
-	// Mensaje visual con emoji, tipo y tamaño
 	emoji := fileTypeEmoji(file.MimeType)
 	size := formatFileSize(file.FileSize)
 	preview := generatePreview(file)
