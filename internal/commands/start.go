@@ -31,13 +31,17 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje de bienvenida en inglés
-	welcomeMessage := "📢 Hello!\n\n" +
-		"Send or forward any file to me, and I will provide a streaming and download link.\n\n" +
-		"Join my official update channel: @yoelbotsx\n\n" +
-		"Pro Tip: Use a fast browser for lightning-fast downloads! 🔥\n\n" +
-		"Use /stats to view bot statistics."
+	// Mensaje de bienvenida en inglés con MarkdownV2 (negrita y cursiva)
+	welcomeMessage := "*📢 Send or Forward any file*\n\n" +
+		"_I will generate a link for direct download or streaming if it's multimedia._\n\n" +
+		"_Supports videos, documents, images, rar/zip files, and other uncommon formats._\n" +
+		"_Playback may fail on some formats, so it is recommended to open links in Chrome._\n\n" +
+		"*Official Update Channel:* @yoelbotsx\n\n" +
+		"*Use /stats to view bot statistics.*"
 
-	ctx.Reply(u, welcomeMessage, nil)
+	ctx.Reply(u, welcomeMessage, &ext.ReplyOpts{
+		ParseMode: ext.ParseModeMarkdownV2,
+	})
+
 	return dispatcher.EndGroups
 }
