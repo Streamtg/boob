@@ -31,7 +31,7 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Mensaje de bienvenida en inglés con MarkdownV2 (negrita y cursiva)
+	// Mensaje de bienvenida en inglés con negrita y cursiva usando caracteres Markdown
 	welcomeMessage := "*📢 Send or Forward any file*\n\n" +
 		"_I will generate a link for direct download or streaming if it's multimedia._\n\n" +
 		"_Supports videos, documents, images, rar/zip files, and other uncommon formats._\n" +
@@ -39,9 +39,8 @@ func start(ctx *ext.Context, u *ext.Update) error {
 		"*Official Update Channel:* @yoelbotsx\n\n" +
 		"*Use /stats to view bot statistics.*"
 
-	ctx.Reply(u, welcomeMessage, &ext.ReplyOpts{
-		ParseMode: ext.ParseModeMarkdownV2,
-	})
+	// Envía el mensaje sin especificar ParseMode
+	ctx.Reply(u, welcomeMessage, nil)
 
 	return dispatcher.EndGroups
 }
