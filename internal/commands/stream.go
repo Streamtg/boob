@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"math"
 	"net/url"
 	"strings"
 
@@ -39,22 +38,6 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	}
 }
 
-func formatFileSize(bytes int64) string {
-	const (
-		KB = 1024
-		MB = 1024 * KB
-		GB = 1024 * MB
-	)
-	switch {
-	case bytes >= GB:
-		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
-	case bytes >= MB:
-		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
-	default:
-		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
-	}
-}
-
 func fileTypeEmoji(mime string) string {
 	lowerMime := strings.ToLower(mime)
 	switch {
@@ -75,28 +58,6 @@ func fileTypeEmoji(mime string) string {
 	default:
 		return "📄"
 	}
-}
-
-func sanitizeFileName(name string) string {
-	name = strings.ReplaceAll(name, " ", "_")
-	name = strings.Map(func(r rune) rune {
-		if strings.ContainsRune(`\/:*?"<>|`, r) {
-			return -1
-		}
-		return r
-	}, name)
-	return name
-}
-
-func formatDuration(seconds float64) string {
-	total := int(math.Round(seconds))
-	hours := total / 3600
-	minutes := (total % 3600) / 60
-	secs := total % 60
-	if hours > 0 {
-		return fmt.Sprintf("⏱ Duration: %02d:%02d:%02d", hours, minutes, secs)
-	}
-	return fmt.Sprintf("⏱ Duration: %02d:%02d", minutes, secs)
 }
 
 func sendLink(ctx *ext.Context, u *ext.Update) error {
@@ -137,87 +98,38 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
+	// ----- REENVÍO AL LOG CHANNEL CON INFORMACIÓN DEL USUARIO -----
+	sender := u.EffectiveMessage.Sender
+	senderName := utils.GetName(sender) // función de utils que retorna nombre completo del usuario
+	logMessage := fmt.Sprintf("📤 Enviado por: %s (ID: %d)", senderName, sender.ID)
+
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
+		ctx.Reply(u, fmt.Sprintf("Error al enviar al log channel - %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
+	// Agregamos un mensaje en el log channel con info del usuario
+	_, _ = ctx.SendMessage(config.ValueOf.LogChannelID, logMessage, nil)
+	// -------------------------------------------------------------
+
 	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
-	media := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
-	file, err := utils.FileFromMedia(media)
+	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
+	file, err := utils.FileFromMedia(doc)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error - %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
 	if file.FileName == "" {
-		var ext string
-		lowerMime := strings.ToLower(file.MimeType)
-		switch {
-		case strings.Contains(lowerMime, "image/jpeg"):
-			ext = ".jpg"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/png"):
-			ext = ".png"
-			file.FileName = "photo" + ext
-		case strings.Contains(lowerMime, "image/gif"):
-			ext = ".gif"
-			file.FileName = "animation" + ext
-		case strings.Contains(lowerMime, "video"):
-			ext = ".mp4"
-			file.FileName = "video" + ext
-		case strings.Contains(lowerMime, "audio"):
-			ext = ".mp3"
-			file.FileName = "audio" + ext
-		case strings.Contains(lowerMime, "pdf"):
-			ext = ".pdf"
-			file.FileName = "document" + ext
-		case strings.Contains(lowerMime, "zip"):
-			ext = ".zip"
-			file.FileName = "archive" + ext
-		case strings.Contains(lowerMime, "rar"):
-			ext = ".rar"
-			file.FileName = "archive" + ext
-		case strings.Contains(lowerMime, "text"):
-			ext = ".txt"
-			file.FileName = "text" + ext
-		case strings.Contains(lowerMime, "application"):
-			ext = ".bin"
-			file.FileName = "file" + ext
-		default:
-			file.FileName = "unknown"
-		}
+		file.FileName = "unknown"
 	}
 
-	file.FileName = sanitizeFileName(file.FileName)
 	emoji := fileTypeEmoji(file.MimeType)
-	size := formatFileSize(file.FileSize)
-
-	durationMsg := ""
-	switch m := media.(type) {
-	case *tg.MessageMediaVideo:
-		durationMsg = formatDuration(m.Duration)
-	case *tg.MessageMediaAudio:
-		durationMsg = formatDuration(m.Duration)
-	case *tg.MessageMediaDocument:
-		// Si es un documento de video/audio, extraemos duración de DocumentAttribute
-		switch doc := m.Document.(type) {
-		case *tg.Document:
-			if doc.Video != nil {
-				durationMsg = formatDuration(float64(doc.Video.Duration))
-			} else if doc.Audio != nil {
-				durationMsg = formatDuration(float64(doc.Audio.Duration))
-			}
-		}
-	}
-
 	message := fmt.Sprintf(
-		"%s File Name: %s\n\n%s File Type: %s\n\n💾 Size: %s\n%s\n\n⏳ @yoelbots",
+		"%s File Name: %s\n\n%s File Type: %s\n\n⏳ @yoelbots",
 		emoji, file.FileName,
 		emoji, file.MimeType,
-		size,
-		durationMsg,
 	)
 
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
