@@ -2,7 +2,6 @@ package commands
 
 import (
 	"fmt"
-	"net/url"
 
 	"EverythingSuckz/fsb/config"
 	"EverythingSuckz/fsb/internal/utils"
@@ -11,10 +10,10 @@ import (
 	"github.com/celestix/gotgproto/dispatcher/handlers"
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/storage"
-	"github.com/gotd/td/tg"
+	"github.com/celestix/gotgproto/types"
 )
 
-// Mensajes de bienvenida por idioma
+// Mensajes de bienvenida en 10 idiomas
 var welcomeMessages = map[string]string{
 	"en": "Welcome! 🤓 Send me or forward any type of file and I'll give you a direct streamable link!\n\nJoin my official channel @yoelbotsx for updates 🗿",
 	"zh": "欢迎！🤓 发送或转发任何类型的文件，我会为您生成直接的流媒体链接！\n\n加入我的官方频道 @yoelbotsx 获取更新 🗿",
@@ -28,51 +27,34 @@ var welcomeMessages = map[string]string{
 	"ur": "خوش آمدید! 🤓 مجھے کوئی بھی فائل بھیجیں یا فارورڈ کریں اور میں آپ کو براہ راست اسٹریمنگ لنک دوں گا!\n\nاپڈیٹس کے لیے میرے آفیشل چینل @yoelbotsx سے جڑیں 🗿",
 }
 
-// Idiomas disponibles para botones
-var languages = []string{"English", "Mandarin", "Hindi", "Spanish", "French", "Arabic", "Bengali", "Russian", "Portuguese", "Urdu"}
-
 func (m *command) LoadStart(dispatcher dispatcher.Dispatcher) {
 	log := m.log.Named("start")
 	defer log.Sugar().Info("Loaded")
+
+	// Comando /start
 	dispatcher.AddHandler(handlers.NewCommand("start", start))
+	// Manejo de cualquier archivo enviado
 	dispatcher.AddHandler(handlers.NewMessage(nil, handleFile))
 }
 
 func start(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
-	peerChat := ctx.PeerStorage.GetPeerById(chatId)
-	if peerChat == nil || peerChat.Type != int(storage.TypeUser) {
+	peer := ctx.PeerStorage.GetPeerById(chatId)
+	if peer == nil || peer.Type != int(storage.TypeUser) {
 		return dispatcher.EndGroups
 	}
 
-	// Detectar idioma del usuario
-	userLang := "en" // Por defecto inglés
-	if u.EffectiveMessage.From != nil && u.EffectiveMessage.From.LanguageCode != "" {
-		if _, ok := welcomeMessages[u.EffectiveMessage.From.LanguageCode]; ok {
-			userLang = u.EffectiveMessage.From.LanguageCode
-		}
-	}
+	// Mensaje por defecto en inglés
+	message := welcomeMessages["en"]
+	ctx.Reply(u, message, nil)
 
-	message := welcomeMessages[userLang]
-
-	// Teclado para selección de idioma
-	var rows []tg.KeyboardButtonRow
-	langRow := tg.KeyboardButtonRow{}
-	for _, lang := range languages {
-		langRow.Buttons = append(langRow.Buttons, &tg.KeyboardButton{Text: lang})
-	}
-	rows = append(rows, langRow)
-
-	markup := &tg.ReplyInlineMarkup{Rows: rows}
-	ctx.Reply(u, message, &ext.ReplyOpts{Markup: markup})
 	return dispatcher.EndGroups
 }
 
-// Manejo de cualquier archivo enviado
 func handleFile(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 
-	// Verificar usuario permitido
+	// Validar usuario permitido
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
@@ -84,24 +66,17 @@ func handleFile(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Reenviar al canal oficial
-	update, err := utils.ForwardMessages(ctx, chatId, "@yoelbotsx", msg.ID)
+	// Reenviar al canal oficial (ID numérico en config)
+	logChannelID := config.ValueOf.LogChannelID
+	update, err := utils.ForwardMessages(ctx, chatId, logChannelID, msg.ID)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error forwarding: %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
 	// Generar enlace de streaming / descarga
-	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
-	fileName := "file"
-	if msg.Document != nil && msg.Document.FileName != "" {
-		fileName = msg.Document.FileName
-	}
-
-	videoParam := fmt.Sprintf("%d", messageID)
-	encodedVideo := url.QueryEscape(videoParam)
-	encodedFilename := url.QueryEscape(fileName)
-	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", encodedVideo, encodedFilename)
+	messageID := update.Updates[0].(*types.UpdateMessageID).ID
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d", messageID)
 
 	ctx.Reply(u, fmt.Sprintf("Your streaming/download link is ready:\n%s", streamURL), nil)
 	return dispatcher.EndGroups
