@@ -137,7 +137,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	
 	// Create formatted message with clickable hyperlink
-	message := fmt.Sprintf("📄 File Name: %s\n\n📥 Download Link:\n%s\n\n⏳ Link validity is 24 hours", file.FileName, link)
+	message := fmt.Sprintf("📄 File Name: %s\n\n📥 Download Link:\n%s\n\n@yoelbotsx", file.FileName, link)
 	
 	row := tg.KeyboardButtonRow{
 		Buttons: []tg.KeyboardButtonClass{
@@ -149,7 +149,7 @@ func sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	// Add Stream button only for video files
 	if strings.Contains(file.MimeType, "video") {
-		streamURL := fmt.Sprintf("https://stream.hariharantelegram.workers.dev/?video=%s", link)
+		streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s", link)
 		row.Buttons = append(row.Buttons, &tg.KeyboardButtonURL{
 			Text: "Stream",
 			URL:  streamURL,
