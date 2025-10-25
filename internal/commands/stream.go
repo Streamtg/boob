@@ -113,8 +113,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	// Build file hash & stream link
-	// ← Aquí hacemos la conversión de int64 a int
-	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, int(file.ID))
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID) // CORRECTO: usar file.ID directo
 	hash := utils.GetShortHash(fullHash)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s",
 		url.QueryEscape(fmt.Sprintf("%d?hash=%s", messageID, hash)),
