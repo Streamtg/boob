@@ -54,8 +54,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 
 	// Permission check
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
-		ctx.Reply(u, "You are not allowed to use this bot.", nil)
-		return dispatcher.EndGroups
+		return sendWithFloodWait(ctx, u, "You are not allowed to use this bot.")
 	}
 
 	// Force subscription check
@@ -81,16 +80,14 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	// Check if message has supported media
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil || !supported {
-		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
-		return dispatcher.EndGroups
+		return sendWithFloodWait(ctx, u, "Sorry, this message type is unsupported.")
 	}
 
 	// Forward message to log channel
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		m.log.Sugar().Errorf("Forward failed: %v", err)
-		ctx.Reply(u, fmt.Sprintf("Error forwarding message: %s", err.Error()), nil)
-		return dispatcher.EndGroups
+		return sendWithFloodWait(ctx, u, fmt.Sprintf("Error forwarding message: %s", err.Error()))
 	}
 
 	// Extract file
@@ -98,8 +95,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error extracting file: %s", err.Error()), nil)
-		return dispatcher.EndGroups
+		return sendWithFloodWait(ctx, u, fmt.Sprintf("Error extracting file: %s", err.Error()))
 	}
 
 	// Assign numeric-only filename if missing
@@ -113,7 +109,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 
 	// Build file hash & stream link
-	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID) // CORRECTO: usar file.ID directo
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s",
 		url.QueryEscape(fmt.Sprintf("%d?hash=%s", messageID, hash)),
@@ -146,17 +142,28 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	// Send message
-	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+	// Send message con manejo de FLOOD_WAIT
+	return sendWithFloodWait(ctx, u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
-	if err != nil {
-		m.log.Sugar().Errorf("Failed to send reply: %v", err)
-		ctx.Reply(u, fmt.Sprintf("Error sending reply: %s", err.Error()), nil)
-	}
+}
 
-	return dispatcher.EndGroups
+// sendWithFloodWait retries automatically si Telegram retorna FLOOD_WAIT
+func sendWithFloodWait(ctx *ext.Context, u *ext.Update, msg string, opts ...*ext.ReplyOpts) error {
+	for {
+		_, err := ctx.Reply(u, msg, opts...)
+		if err != nil {
+			if floodErr, ok := err.(*tg.ErrFlood); ok {
+				wait := time.Duration(floodErr.Timeout) * time.Second
+				time.Sleep(wait + time.Second) // agrega 1s extra por seguridad
+				continue
+			}
+			return err
+		}
+		break
+	}
+	return nil
 }
 
 // getExtensionFromMIME returns file extension based on MIME type
