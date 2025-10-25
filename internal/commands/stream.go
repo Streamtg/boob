@@ -19,8 +19,8 @@ import (
 
 // LoadStream registers the handler for incoming messages
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	log := m.log.Named("start")
-	defer log.Sugar().Info("Loaded Stream handler")
+	log := m.log.Named("stream")
+	defer log.Sugar().Info("Stream handler loaded")
 	dispatcher.AddHandler(
 		handlers.NewMessage(nil, m.sendLink),
 	)
@@ -50,17 +50,17 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 
 // sendLink processes the message, forwards it, and sends the formatted output
 func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
-	chatId := u.EffectiveChat().GetID()
+	chatID := u.EffectiveChat().GetID()
 
 	// Permission check
-	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
+	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatID) {
 		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
 	// Force subscription check
 	if config.ValueOf.ForceSubChannel != "" {
-		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
+		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatID)
 		if err != nil || !isSubscribed {
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
@@ -71,9 +71,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 				},
 			}
 			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{Markup: markup})
 			return dispatcher.EndGroups
 		}
 	}
@@ -85,60 +83,58 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Forward message to log channel
-	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
+	// Forward to log channel
+	update, err := utils.ForwardMessages(ctx, chatID, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		m.log.Sugar().Errorf("Forward failed: %v", err)
 		ctx.Reply(u, fmt.Sprintf("Error forwarding message: %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Extract file
-	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
-	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
+	// ✅ Extraer el Media del mensaje reenviado correctamente
+	var doc tg.MessageMediaClass
+	if newMsg, ok := update.Updates[1].(*tg.UpdateNewChannelMessage); ok {
+		doc = newMsg.Message.Media
+	} else {
+		ctx.Reply(u, "Unsupported update type", nil)
+		return dispatcher.EndGroups
+	}
+
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error extracting file: %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
-	// Assign numeric-only filename if missing
+	// Asignar nombre al archivo
 	if file.FileName == "" || !strings.Contains(file.FileName, ".") {
 		ext := getExtensionFromMIME(file.MimeType)
-		if file.FileName == "" {
-			file.FileName = fmt.Sprintf("%d%d%s", time.Now().UnixNano(), file.ID, ext)
-		} else {
-			file.FileName += ext
-		}
+		file.FileName = fmt.Sprintf("%d%s", time.Now().Unix(), ext)
 	}
 
-	// Build file hash & stream link
-	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID) // CORRECTO: usar file.ID directo
+	// Generar hash y enlace del Worker
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
-	streamURL := fmt.Sprintf("https://host.streamgramm.workers.dev/?video=%s&filename=%s",
-		url.QueryEscape(fmt.Sprintf("%d?hash=%s", messageID, hash)),
-		url.QueryEscape(file.FileName),
+	streamURL := fmt.Sprintf(
+		"https://host.streamgramm.workers.dev/?video=%d&hash=%s&filename=%s",
+		file.ID, hash, url.QueryEscape(file.FileName),
 	)
 
-	// Update stats cache
-	statsCache := cache.GetStatsCache()
-	if statsCache != nil {
+	// Guardar estadísticas
+	if statsCache := cache.GetStatsCache(); statsCache != nil {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Determine emoji based on file type
+	// Construir respuesta
 	fileEmoji := getFileEmoji(file.MimeType)
-
-	// Construct message
 	message := fmt.Sprintf(
-		"%s File: %s\n📂 Type: %s\n💽 Size: %s\n\n❗ WARNING:\n🚫 Illegal or explicit content = Ban + Report\n\n🔗 Follow: @yoelbotsx",
+		"%s File: %s\n📂 Type: %s\n💽 Size: %s\n\n⚠️ Do not share illegal content.\n\n🔗 @yoelbotsx",
 		fileEmoji,
 		file.FileName,
 		file.MimeType,
 		formatFileSize(file.FileSize),
 	)
 
-	// Inline keyboard with download/stream
 	row := tg.KeyboardButtonRow{
 		Buttons: []tg.KeyboardButtonClass{
 			&tg.KeyboardButtonURL{Text: "▶️ Watch / Download", URL: streamURL},
@@ -146,29 +142,27 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	// Send message
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
 	if err != nil {
 		m.log.Sugar().Errorf("Failed to send reply: %v", err)
-		ctx.Reply(u, fmt.Sprintf("Error sending reply: %s", err.Error()), nil)
 	}
 
 	return dispatcher.EndGroups
 }
 
-// getExtensionFromMIME returns file extension based on MIME type
+// --- Utilidades ---
 func getExtensionFromMIME(mime string) string {
 	mime = strings.ToLower(mime)
 	switch {
 	case strings.HasPrefix(mime, "video/"):
 		return ".mp4"
-	case strings.HasPrefix(mime, "image/"):
-		return ".jpg"
 	case strings.HasPrefix(mime, "audio/"):
 		return ".mp3"
+	case strings.HasPrefix(mime, "image/"):
+		return ".jpg"
 	case strings.Contains(mime, "pdf"):
 		return ".pdf"
 	case strings.Contains(mime, "zip"):
@@ -182,7 +176,6 @@ func getExtensionFromMIME(mime string) string {
 	}
 }
 
-// getFileEmoji returns an emoji depending on file type
 func getFileEmoji(mime string) string {
 	lower := strings.ToLower(mime)
 	switch {
@@ -203,7 +196,6 @@ func getFileEmoji(mime string) string {
 	}
 }
 
-// formatFileSize formats bytes into KB, MB, GB
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
