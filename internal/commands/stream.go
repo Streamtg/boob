@@ -17,19 +17,21 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-// LoadStream registra el handler para nuevos mensajes
+// LoadStream registers the handler for incoming messages
 func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	defer m.log.Sugar().Info("Loaded Stream handler")
-	dispatcher.AddHandler(handlers.NewMessage(nil, m.sendLink))
+	log := m.log.Named("start")
+	defer log.Sugar().Info("Loaded Stream handler")
+	dispatcher.AddHandler(
+		handlers.NewMessage(nil, m.sendLink),
+	)
 }
 
-// supportedMediaFilter valida si el mensaje tiene medios soportados
-func supportedMediaFilter(msg *types.Message) (bool, error) {
-	if msg.Media == nil {
+// supportedMediaFilter checks if the message contains supported media
+func supportedMediaFilter(m *types.Message) (bool, error) {
+	if m.Media == nil {
 		return false, dispatcher.EndGroups
 	}
-
-	switch media := msg.Media.(type) {
+	switch media := m.Media.(type) {
 	case *tg.MessageMediaDocument:
 		doc := media.Document.(*tg.Document)
 		if strings.HasPrefix(doc.MimeType, "video/") ||
@@ -46,20 +48,20 @@ func supportedMediaFilter(msg *types.Message) (bool, error) {
 	return false, nil
 }
 
-// sendLink procesa el mensaje y envía el enlace
+// sendLink processes the message, forwards it, and sends the formatted output
 func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
-	chatID := u.EffectiveChat().GetID()
+	chatId := u.EffectiveChat().GetID()
 
 	// 1️⃣ Permisos
-	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatID) {
-		ctx.Reply(u, "No tienes permiso para usar este bot.", nil)
+	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
+		ctx.Reply(u, "You are not allowed to use this bot.", nil)
 		return dispatcher.EndGroups
 	}
 
-	// 2️⃣ Force Subscription
+	// 2️⃣ Force subscription check
 	if config.ValueOf.ForceSubChannel != "" {
-		subscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatID)
-		if err != nil || !subscribed {
+		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
+		if err != nil || !isSubscribed {
 			row := tg.KeyboardButtonRow{
 				Buttons: []tg.KeyboardButtonClass{
 					&tg.KeyboardButtonURL{
@@ -69,79 +71,72 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 				},
 			}
 			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-			ctx.Reply(u, "Por favor únete al canal para obtener los enlaces.", &ext.ReplyOpts{Markup: markup})
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
+				Markup: markup,
+			})
 			return dispatcher.EndGroups
 		}
 	}
 
-	// 3️⃣ Validar tipo de medio
+	// 3️⃣ Validar tipo de media
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil || !supported {
-		ctx.Reply(u, "Tipo de mensaje no soportado.", nil)
+		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
 		return dispatcher.EndGroups
 	}
 
-	// 4️⃣ Forward al canal log si está configurado
-	var forwarded *tg.Message
-	if config.ValueOf.LogChannelID != 0 {
-		fw, err := utils.ForwardMessages(ctx, chatID, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
-		if err != nil {
-			m.log.Sugar().Errorf("Forward failed: %v", err)
-		} else if len(fw.Updates) > 0 {
-			if up, ok := fw.Updates[0].(*tg.UpdateNewChannelMessage); ok {
-				forwarded = up.Message.(*tg.Message)
-			}
-		}
-	}
-
-	// 5️⃣ Extraer archivo
-	var file *utils.File
+	// 4️⃣ Extraer archivo
+	var fileData any
 	switch media := u.EffectiveMessage.Media.(type) {
 	case *tg.MessageMediaDocument:
-		file, err = utils.FileFromMedia(media)
+		fileData, err = utils.FileFromMedia(media)
 	case *tg.MessageMediaPhoto:
-		file, err = utils.FileFromMedia(media)
+		fileData, err = utils.FileFromMedia(media)
 	default:
 		err = fmt.Errorf("tipo de media no soportado")
 	}
+
 	if err != nil {
 		ctx.Reply(u, fmt.Sprintf("Error al extraer archivo: %s", err.Error()), nil)
 		return dispatcher.EndGroups
 	}
 
-	// 6️⃣ Asignar filename si no tiene
+	file := fileData.(*utils.File) // type assertion
+
+	// 5️⃣ Asignar nombre si falta
 	if file.FileName == "" || !strings.Contains(file.FileName, ".") {
 		ext := getExtensionFromMIME(file.MimeType)
 		file.FileName = fmt.Sprintf("%d%d%s", time.Now().UnixNano(), file.ID, ext)
 	}
 
-	// 7️⃣ Generar hash y link
+	// 6️⃣ Generar hash y enlace de streaming
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
-	streamURL := fmt.Sprintf("https://host.streamgramm.workers.dev/?video=%d&hash=%s&filename=%s",
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d&hash=%s&filename=%s",
 		file.ID,
 		hash,
 		url.QueryEscape(file.FileName),
 	)
 
-	// 8️⃣ Actualizar stats
-	if stats := cache.GetStatsCache(); stats != nil {
-		_ = stats.RecordFileProcessed(file.FileSize)
+	// 7️⃣ Actualizar estadísticas
+	statsCache := cache.GetStatsCache()
+	if statsCache != nil {
+		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// 9️⃣ Emoji según tipo
+	// 8️⃣ Emoji según tipo de archivo
 	fileEmoji := getFileEmoji(file.MimeType)
 
-	// 10️⃣ Construir mensaje
+	// 9️⃣ Construir mensaje
 	message := fmt.Sprintf(
-		"%s File: %s\n📂 Tipo: %s\n💽 Tamaño: %s\n\n❗ WARNING:\n🚫 Contenido ilegal o explícito = Ban + Report\n\n🔗 Follow: @yoelbotsx",
+		"%s File: %s\n📂 Type: %s\n💽 Size: %s\n\n❗ WARNING:\n🚫 Illegal or explicit content = Ban + Report\n\n🔗 Follow: @yoelbotsx",
 		fileEmoji,
 		file.FileName,
 		file.MimeType,
 		formatFileSize(file.FileSize),
 	)
 
-	// 11️⃣ Inline button
+	// 10️⃣ Inline keyboard
 	row := tg.KeyboardButtonRow{
 		Buttons: []tg.KeyboardButtonClass{
 			&tg.KeyboardButtonURL{Text: "▶️ Watch / Download", URL: streamURL},
@@ -149,23 +144,20 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	// 12️⃣ Enviar mensaje con manejo básico de FLOOD_WAIT
+	// 11️⃣ Enviar mensaje
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		ReplyToMessageId: u.EffectiveMessage.ID,
 	})
 	if err != nil {
-		if strings.Contains(err.Error(), "FLOOD_WAIT") {
-			m.log.Sugar().Warnf("FLOOD_WAIT detected, skipping reply: %v", err)
-		} else {
-			m.log.Sugar().Errorf("Error enviando mensaje: %v", err)
-		}
+		m.log.Sugar().Errorf("Failed to send reply: %v", err)
+		ctx.Reply(u, fmt.Sprintf("Error sending reply: %s", err.Error()), nil)
 	}
 
 	return dispatcher.EndGroups
 }
 
-// getExtensionFromMIME retorna extensión por MIME
+// getExtensionFromMIME returns file extension based on MIME type
 func getExtensionFromMIME(mime string) string {
 	mime = strings.ToLower(mime)
 	switch {
@@ -188,7 +180,7 @@ func getExtensionFromMIME(mime string) string {
 	}
 }
 
-// getFileEmoji retorna emoji según MIME
+// getFileEmoji returns an emoji depending on file type
 func getFileEmoji(mime string) string {
 	lower := strings.ToLower(mime)
 	switch {
@@ -209,7 +201,7 @@ func getFileEmoji(mime string) string {
 	}
 }
 
-// formatFileSize formatea bytes a KB, MB, GB
+// formatFileSize formats bytes into KB, MB, GB
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
