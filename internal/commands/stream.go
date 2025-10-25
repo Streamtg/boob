@@ -161,7 +161,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	// Build file hash & stream link
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
-	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&hash=%s&filename=%s",
+	streamURL := fmt.Sprintf("https://host.streamgramm.workers.dev/?video=%s&hash=%s&filename=%s",
 		url.QueryEscape(realFileID),
 		url.QueryEscape(hash),
 		url.QueryEscape(file.FileName),
