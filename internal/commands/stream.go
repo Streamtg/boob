@@ -48,13 +48,33 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	return false, nil
 }
 
+// sendWithFloodWait envía el mensaje y espera si hay FLOOD_WAIT
+func sendWithFloodWait(ctx *ext.Context, u *ext.Update, msg string, opts *ext.ReplyOpts) error {
+	for {
+		_, err := ctx.Reply(u, msg, opts)
+		if err != nil {
+			// Manejo de FLOOD_WAIT según código RPC
+			if rpcErr, ok := err.(interface{ Code() int; Timeout() int }); ok && rpcErr.Code() == 420 {
+				wait := time.Duration(rpcErr.Timeout()) * time.Second
+				ctx.Logger().Sugar().Warnf("FLOOD_WAIT detected, waiting %v seconds...", wait)
+				time.Sleep(wait + time.Second) // 1s extra por seguridad
+				continue
+			}
+			return err
+		}
+		break
+	}
+	return nil
+}
+
 // sendLink processes the message, forwards it, and sends the formatted output
 func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 
 	// Permission check
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
-		return sendWithFloodWait(ctx, u, "You are not allowed to use this bot.")
+		ctx.Reply(u, "You are not allowed to use this bot.", nil)
+		return dispatcher.EndGroups
 	}
 
 	// Force subscription check
@@ -80,14 +100,16 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	// Check if message has supported media
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil || !supported {
-		return sendWithFloodWait(ctx, u, "Sorry, this message type is unsupported.")
+		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
+		return dispatcher.EndGroups
 	}
 
 	// Forward message to log channel
 	update, err := utils.ForwardMessages(ctx, chatId, config.ValueOf.LogChannelID, u.EffectiveMessage.ID)
 	if err != nil {
 		m.log.Sugar().Errorf("Forward failed: %v", err)
-		return sendWithFloodWait(ctx, u, fmt.Sprintf("Error forwarding message: %s", err.Error()))
+		ctx.Reply(u, fmt.Sprintf("Error forwarding message: %s", err.Error()), nil)
+		return dispatcher.EndGroups
 	}
 
 	// Extract file
@@ -95,7 +117,8 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.(*tg.Message).Media
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
-		return sendWithFloodWait(ctx, u, fmt.Sprintf("Error extracting file: %s", err.Error()))
+		ctx.Reply(u, fmt.Sprintf("Error extracting file: %s", err.Error()), nil)
+		return dispatcher.EndGroups
 	}
 
 	// Assign numeric-only filename if missing
@@ -111,7 +134,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	// Build file hash & stream link
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
-	streamURL := fmt.Sprintf("https://host.streamgramm.workers.dev/?video=%s&filename=%s",
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s",
 		url.QueryEscape(fmt.Sprintf("%d?hash=%s", messageID, hash)),
 		url.QueryEscape(file.FileName),
 	)
@@ -142,28 +165,15 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	// Send message con manejo de FLOOD_WAIT
-	return sendWithFloodWait(ctx, u, message, &ext.ReplyOpts{
+	// Send message using FLOOD_WAIT-safe function
+	if err := sendWithFloodWait(ctx, u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		ReplyToMessageId: u.EffectiveMessage.ID,
-	})
-}
-
-// sendWithFloodWait retries automatically si Telegram retorna FLOOD_WAIT
-func sendWithFloodWait(ctx *ext.Context, u *ext.Update, msg string, opts ...*ext.ReplyOpts) error {
-	for {
-		_, err := ctx.Reply(u, msg, opts...)
-		if err != nil {
-			if floodErr, ok := err.(*tg.ErrFlood); ok {
-				wait := time.Duration(floodErr.Timeout) * time.Second
-				time.Sleep(wait + time.Second) // agrega 1s extra por seguridad
-				continue
-			}
-			return err
-		}
-		break
+	}); err != nil {
+		m.log.Sugar().Errorf("Failed to send reply: %v", err)
 	}
-	return nil
+
+	return dispatcher.EndGroups
 }
 
 // getExtensionFromMIME returns file extension based on MIME type
