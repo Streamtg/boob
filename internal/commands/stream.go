@@ -1,12 +1,8 @@
 package commands
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -19,12 +15,6 @@ import (
 	"github.com/celestix/gotgproto/ext"
 	"github.com/celestix/gotgproto/types"
 	"github.com/gotd/td/tg"
-)
-
-var (
-	workerURL  = os.Getenv("WORKER_URL")  // URL del Cloudflare Worker
-	secretKey  = os.Getenv("SECRET_KEY")  // Clave para HMAC
-	botToken   = os.Getenv("BOT_TOKEN")   // Token del bot de Telegram
 )
 
 // LoadStream registers the handler for incoming messages
@@ -58,15 +48,7 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	return false, nil
 }
 
-// generateHash crea un HMAC seguro para validar el enlace en el Worker
-func generateHash(filename string, filesize int64, mime string, fileID int) string {
-	data := fmt.Sprintf("%s:%d:%s:%d", filename, filesize, mime, fileID)
-	h := hmac.New(sha256.New, []byte(secretKey))
-	h.Write([]byte(data))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// sendLink procesa el mensaje y envía el link seguro
+// sendLink processes the message, forwards it, and sends the formatted output
 func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 
@@ -96,7 +78,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 		}
 	}
 
-	// Check supported media
+	// Check if message has supported media
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil || !supported {
 		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
@@ -120,22 +102,23 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 		return dispatcher.EndGroups
 	}
 
-	// Assign filename if missing
+	// Assign numeric-only filename if missing
 	if file.FileName == "" || !strings.Contains(file.FileName, ".") {
-		file.FileName += getExtensionFromMIME(file.MimeType)
+		ext := getExtensionFromMIME(file.MimeType)
+		if file.FileName == "" {
+			file.FileName = fmt.Sprintf("%d%d%s", time.Now().UnixNano(), file.ID, ext)
+		} else {
+			file.FileName += ext
+		}
 	}
 
-	// Generate secure hash
-	hash := generateHash(file.FileName, file.FileSize, file.MimeType, file.ID)
-
-	// Construct Worker link
-	expires := time.Now().Add(5 * time.Hour).Unix()
-	streamURL := fmt.Sprintf("%s/?video=%d?hash=%s&filename=%s&expires=%d",
-		workerURL,
-		messageID,
-		hash,
+	// Build file hash & stream link
+	// ← Aquí hacemos la conversión de int64 a int
+	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, int(file.ID))
+	hash := utils.GetShortHash(fullHash)
+	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s",
+		url.QueryEscape(fmt.Sprintf("%d?hash=%s", messageID, hash)),
 		url.QueryEscape(file.FileName),
-		expires,
 	)
 
 	// Update stats cache
@@ -144,7 +127,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 		_ = statsCache.RecordFileProcessed(file.FileSize)
 	}
 
-	// Determine emoji
+	// Determine emoji based on file type
 	fileEmoji := getFileEmoji(file.MimeType)
 
 	// Construct message
@@ -156,7 +139,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 		formatFileSize(file.FileSize),
 	)
 
-	// Inline keyboard with Worker link
+	// Inline keyboard with download/stream
 	row := tg.KeyboardButtonRow{
 		Buttons: []tg.KeyboardButtonClass{
 			&tg.KeyboardButtonURL{Text: "▶️ Watch / Download", URL: streamURL},
@@ -164,6 +147,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
+	// Send message
 	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		ReplyToMessageId: u.EffectiveMessage.ID,
