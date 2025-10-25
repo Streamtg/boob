@@ -1,14 +1,10 @@
-package commands
+package main
 
 import (
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
-
-	"EverythingSuckz/fsb/config"
-	"EverythingSuckz/fsb/internal/cache"
-	"EverythingSuckz/fsb/internal/utils"
 
 	"github.com/celestix/gotgproto/dispatcher"
 	"github.com/celestix/gotgproto/dispatcher/handlers"
@@ -17,19 +13,28 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-// LoadStream registers the handler for incoming messages
-func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
-	log := m.log.Named("start")
-	defer log.Sugar().Info("Loaded Stream handler")
-	dispatcher.AddHandler(
-		handlers.NewMessage(nil, m.sendLink),
-	)
+type command struct {
+	log ext.Logger
 }
 
-// supportedMediaFilter checks if the message contains supported media
-func supportedMediaFilter(m *types.Message) (bool, error) {
+// LoadStream registers the handler for incoming messages
+func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
+	defer m.log.Sugar().Info("Loaded Stream handler")
+	dispatcher.AddHandler(handlers.NewMessage(nil, m.sendLink))
+}
+
+// simple File struct interno
+type File struct {
+	ID       int64
+	FileName string
+	FileSize int64
+	MimeType string
+}
+
+// Check supported media
+func supportedMediaFilter(m *types.Message) bool {
 	if m.Media == nil {
-		return false, dispatcher.EndGroups
+		return false
 	}
 	switch media := m.Media.(type) {
 	case *tg.MessageMediaDocument:
@@ -40,147 +45,60 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 			strings.Contains(doc.MimeType, "zip") ||
 			strings.Contains(doc.MimeType, "rar") ||
 			strings.Contains(doc.MimeType, "apk") {
-			return true, nil
+			return true
 		}
 	case *tg.MessageMediaPhoto:
-		return true, nil
+		return true
 	}
-	return false, nil
+	return false
 }
 
-// sendLink processes the message, forwards it, and sends the formatted output
-func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
-	chatId := u.EffectiveChat().GetID()
-
-	// 1️⃣ Permisos
-	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
-		ctx.Reply(u, "You are not allowed to use this bot.", nil)
-		return dispatcher.EndGroups
-	}
-
-	// 2️⃣ Force subscription check
-	if config.ValueOf.ForceSubChannel != "" {
-		isSubscribed, err := utils.IsUserSubscribed(ctx, ctx.Raw, ctx.PeerStorage, chatId)
-		if err != nil || !isSubscribed {
-			row := tg.KeyboardButtonRow{
-				Buttons: []tg.KeyboardButtonClass{
-					&tg.KeyboardButtonURL{
-						Text: "Join Channel",
-						URL:  fmt.Sprintf("https://t.me/%s", config.ValueOf.ForceSubChannel),
-					},
-				},
-			}
-			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
-				Markup: markup,
-			})
-			return dispatcher.EndGroups
-		}
-	}
-
-	// 3️⃣ Validar tipo de media
-	supported, err := supportedMediaFilter(u.EffectiveMessage)
-	if err != nil || !supported {
-		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
-		return dispatcher.EndGroups
-	}
-
-	// 4️⃣ Extraer archivo
-	var fileData any
-	switch media := u.EffectiveMessage.Media.(type) {
+// Convierte media a File
+func fileFromMedia(media tg.MessageMediaClass) (*File, error) {
+	switch m := media.(type) {
 	case *tg.MessageMediaDocument:
-		fileData, err = utils.FileFromMedia(media)
+		doc := m.Document.(*tg.Document)
+		name := doc.FileName
+		if name == "" {
+			name = fmt.Sprintf("%d.bin", time.Now().UnixNano())
+		}
+		return &File{
+			ID:       doc.ID,
+			FileName: name,
+			FileSize: doc.Size,
+			MimeType: doc.MimeType,
+		}, nil
 	case *tg.MessageMediaPhoto:
-		fileData, err = utils.FileFromMedia(media)
+		photo := m.Photo.(*tg.Photo)
+		size := int64(0)
+		if len(photo.Sizes) > 0 {
+			size = photo.Sizes[len(photo.Sizes)-1].Size
+		}
+		return &File{
+			ID:       photo.ID,
+			FileName: fmt.Sprintf("%d.jpg", time.Now().UnixNano()),
+			FileSize: size,
+			MimeType: "image/jpeg",
+		}, nil
 	default:
-		err = fmt.Errorf("tipo de media no soportado")
-	}
-
-	if err != nil {
-		ctx.Reply(u, fmt.Sprintf("Error al extraer archivo: %s", err.Error()), nil)
-		return dispatcher.EndGroups
-	}
-
-	file := fileData.(*utils.File) // type assertion
-
-	// 5️⃣ Asignar nombre si falta
-	if file.FileName == "" || !strings.Contains(file.FileName, ".") {
-		ext := getExtensionFromMIME(file.MimeType)
-		file.FileName = fmt.Sprintf("%d%d%s", time.Now().UnixNano(), file.ID, ext)
-	}
-
-	// 6️⃣ Generar hash y enlace de streaming
-	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
-	hash := utils.GetShortHash(fullHash)
-	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%d&hash=%s&filename=%s",
-		file.ID,
-		hash,
-		url.QueryEscape(file.FileName),
-	)
-
-	// 7️⃣ Actualizar estadísticas
-	statsCache := cache.GetStatsCache()
-	if statsCache != nil {
-		_ = statsCache.RecordFileProcessed(file.FileSize)
-	}
-
-	// 8️⃣ Emoji según tipo de archivo
-	fileEmoji := getFileEmoji(file.MimeType)
-
-	// 9️⃣ Construir mensaje
-	message := fmt.Sprintf(
-		"%s File: %s\n📂 Type: %s\n💽 Size: %s\n\n❗ WARNING:\n🚫 Illegal or explicit content = Ban + Report\n\n🔗 Follow: @yoelbotsx",
-		fileEmoji,
-		file.FileName,
-		file.MimeType,
-		formatFileSize(file.FileSize),
-	)
-
-	// 10️⃣ Inline keyboard
-	row := tg.KeyboardButtonRow{
-		Buttons: []tg.KeyboardButtonClass{
-			&tg.KeyboardButtonURL{Text: "▶️ Watch / Download", URL: streamURL},
-		},
-	}
-	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-
-	// 11️⃣ Enviar mensaje
-	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
-		Markup:           markup,
-		ReplyToMessageId: u.EffectiveMessage.ID,
-	})
-	if err != nil {
-		m.log.Sugar().Errorf("Failed to send reply: %v", err)
-		ctx.Reply(u, fmt.Sprintf("Error sending reply: %s", err.Error()), nil)
-	}
-
-	return dispatcher.EndGroups
-}
-
-// getExtensionFromMIME returns file extension based on MIME type
-func getExtensionFromMIME(mime string) string {
-	mime = strings.ToLower(mime)
-	switch {
-	case strings.HasPrefix(mime, "video/"):
-		return ".mp4"
-	case strings.HasPrefix(mime, "image/"):
-		return ".jpg"
-	case strings.HasPrefix(mime, "audio/"):
-		return ".mp3"
-	case strings.Contains(mime, "pdf"):
-		return ".pdf"
-	case strings.Contains(mime, "zip"):
-		return ".zip"
-	case strings.Contains(mime, "rar"):
-		return ".rar"
-	case strings.Contains(mime, "apk"):
-		return ".apk"
-	default:
-		return ".file"
+		return nil, fmt.Errorf("unsupported media")
 	}
 }
 
-// getFileEmoji returns an emoji depending on file type
+// Build file hash placeholder
+func packFile(name string, size int64, mime string, id int64) string {
+	return fmt.Sprintf("%s-%d-%s-%d", name, size, mime, id)
+}
+
+// Short hash placeholder
+func getShortHash(full string) string {
+	if len(full) < 8 {
+		return full
+	}
+	return full[:8]
+}
+
+// Emoji según tipo de archivo
 func getFileEmoji(mime string) string {
 	lower := strings.ToLower(mime)
 	switch {
@@ -201,7 +119,7 @@ func getFileEmoji(mime string) string {
 	}
 }
 
-// formatFileSize formats bytes into KB, MB, GB
+// Formato de tamaño
 func formatFileSize(bytes int64) string {
 	const (
 		KB = 1024
@@ -216,4 +134,56 @@ func formatFileSize(bytes int64) string {
 	default:
 		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
 	}
+}
+
+// sendLink
+func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
+	chatId := u.EffectiveChat().GetID()
+	msg := u.EffectiveMessage
+
+	if !supportedMediaFilter(msg) {
+		ctx.Reply(u, "Unsupported message type", nil)
+		return dispatcher.EndGroups
+	}
+
+	file, err := fileFromMedia(msg.Media)
+	if err != nil {
+		ctx.Reply(u, fmt.Sprintf("Error extracting file: %v", err), nil)
+		return dispatcher.EndGroups
+	}
+
+	fullHash := packFile(file.FileName, file.FileSize, file.MimeType, file.ID)
+	hash := getShortHash(fullHash)
+
+	streamURL := fmt.Sprintf("https://host.streamgramm.workers.dev/?video=%d&hash=%s&filename=%s",
+		file.ID,
+		url.QueryEscape(hash),
+		url.QueryEscape(file.FileName),
+	)
+
+	// Construir mensaje
+	message := fmt.Sprintf("%s File: %s\n📂 Type: %s\n💽 Size: %s",
+		getFileEmoji(file.MimeType),
+		file.FileName,
+		file.MimeType,
+		formatFileSize(file.FileSize),
+	)
+
+	row := tg.KeyboardButtonRow{
+		Buttons: []tg.KeyboardButtonClass{
+			&tg.KeyboardButtonURL{Text: "▶️ Watch / Download", URL: streamURL},
+		},
+	}
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
+
+	_, err = ctx.Reply(u, message, &ext.ReplyOpts{
+		Markup:           markup,
+		ReplyToMessageId: msg.ID,
+	})
+	if err != nil {
+		m.log.Sugar().Errorf("Failed to send reply: %v", err)
+		ctx.Reply(u, fmt.Sprintf("Error sending reply: %s", err.Error()), nil)
+	}
+
+	return dispatcher.EndGroups
 }
