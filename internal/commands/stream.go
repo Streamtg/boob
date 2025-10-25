@@ -48,32 +48,14 @@ func supportedMediaFilter(m *types.Message) (bool, error) {
 	return false, nil
 }
 
-// sendWithFloodWait envía el mensaje y espera si hay FLOOD_WAIT
-func (m *command) sendWithFloodWait(ctx *ext.Context, u *ext.Update, msg string, opts *ext.ReplyOpts) error {
-	for {
-		_, err := ctx.Reply(u, msg, opts)
-		if err != nil {
-			// Manejo de FLOOD_WAIT según código RPC
-			if rpcErr, ok := err.(interface{ Code() int; Timeout() int }); ok && rpcErr.Code() == 420 {
-				wait := time.Duration(rpcErr.Timeout()) * time.Second
-				m.log.Sugar().Warnf("FLOOD_WAIT detected, waiting %v seconds...", wait)
-				time.Sleep(wait + time.Second)
-				continue
-			}
-			return err
-		}
-		break
-	}
-	return nil
-}
-
 // sendLink processes the message, forwards it, and sends the formatted output
 func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	chatId := u.EffectiveChat().GetID()
 
 	// Permission check
 	if len(config.ValueOf.AllowedUsers) != 0 && !utils.Contains(config.ValueOf.AllowedUsers, chatId) {
-		return m.sendWithFloodWait(ctx, u, "You are not allowed to use this bot.", nil)
+		ctx.Reply(u, "You are not allowed to use this bot.", nil)
+		return dispatcher.EndGroups
 	}
 
 	// Force subscription check
@@ -89,16 +71,18 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 				},
 			}
 			markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
-			return m.sendWithFloodWait(ctx, u, "Please join our channel to get stream links.", &ext.ReplyOpts{
+			ctx.Reply(u, "Please join our channel to get stream links.", &ext.ReplyOpts{
 				Markup: markup,
 			})
+			return dispatcher.EndGroups
 		}
 	}
 
 	// Check if message has supported media
 	supported, err := supportedMediaFilter(u.EffectiveMessage)
 	if err != nil || !supported {
-		return m.sendWithFloodWait(ctx, u, "Sorry, this message type is unsupported.", nil)
+		ctx.Reply(u, "Sorry, this message type is unsupported.", nil)
+		return dispatcher.EndGroups
 	}
 
 	// Forward message to log channel
@@ -108,9 +92,26 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 		return m.sendWithFloodWait(ctx, u, fmt.Sprintf("Error forwarding message: %s", err.Error()), nil)
 	}
 
+	// Type-safe extraction of Media
+	newMsg, ok := update.Updates[1].(*tg.UpdateNewChannelMessage)
+	if !ok {
+		m.log.Sugar().Error("Expected UpdateNewChannelMessage, got different type")
+		return dispatcher.EndGroups
+	}
+
+	msg, ok := newMsg.Message.(*tg.Message)
+	if !ok {
+		m.log.Sugar().Error("Expected tg.Message, got different type")
+		return dispatcher.EndGroups
+	}
+
+	doc := msg.Media
+	if doc == nil {
+		m.log.Sugar().Error("Message.Media is nil")
+		return dispatcher.EndGroups
+	}
+
 	// Extract file
-	messageID := update.Updates[0].(*tg.UpdateMessageID).ID
-	doc := update.Updates[1].(*tg.UpdateNewChannelMessage).Message.Media
 	file, err := utils.FileFromMedia(doc)
 	if err != nil {
 		return m.sendWithFloodWait(ctx, u, fmt.Sprintf("Error extracting file: %s", err.Error()), nil)
@@ -130,7 +131,7 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	fullHash := utils.PackFile(file.FileName, file.FileSize, file.MimeType, file.ID)
 	hash := utils.GetShortHash(fullHash)
 	streamURL := fmt.Sprintf("https://file.streamgramm.workers.dev/?video=%s&filename=%s",
-		url.QueryEscape(fmt.Sprintf("%d?hash=%s", messageID, hash)),
+		url.QueryEscape(fmt.Sprintf("%d?hash=%s", newMsg.ID, hash)),
 		url.QueryEscape(file.FileName),
 	)
 
@@ -160,15 +161,29 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 	}
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{row}}
 
-	// Send message
-	if err := m.sendWithFloodWait(ctx, u, message, &ext.ReplyOpts{
+	// Send message with FLOOD_WAIT handling
+	return m.sendWithFloodWait(ctx, u, message, &ext.ReplyOpts{
 		Markup:           markup,
 		ReplyToMessageId: u.EffectiveMessage.ID,
-	}); err != nil {
+	})
+}
+
+// sendWithFloodWait handles replies and waits in case of FLOOD_WAIT
+func (m *command) sendWithFloodWait(ctx *ext.Context, u *ext.Update, msg string, opts *ext.ReplyOpts) error {
+	_, err := ctx.Reply(u, msg, opts)
+	if err != nil {
+		if strings.Contains(err.Error(), "FLOOD_WAIT") {
+			// Extract seconds from error
+			var sec int
+			fmt.Sscanf(err.Error(), "rpc error code 420: FLOOD_WAIT (%d)", &sec)
+			m.log.Sugar().Warnf("FLOOD_WAIT, sleeping %d seconds", sec)
+			time.Sleep(time.Duration(sec+1) * time.Second)
+			_, _ = ctx.Reply(u, msg, opts)
+			return nil
+		}
 		m.log.Sugar().Errorf("Failed to send reply: %v", err)
 	}
-
-	return dispatcher.EndGroups
+	return nil
 }
 
 // getExtensionFromMIME returns file extension based on MIME type
