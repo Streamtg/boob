@@ -39,27 +39,13 @@ func (m *command) LoadStream(dispatcher dispatcher.Dispatcher) {
 	dispatcher.AddHandler(
 		handlers.NewCommand("broadcast", m.broadcastMessage),
 	)
-	// Handler para /series
-	dispatcher.AddHandler(
-		handlers.NewCommand("series", m.handleSeries),
-	)
-	// Inicializar mapas si no existen
-	m.mutex.Lock()
-	if m.seriesModes == nil {
-		m.seriesModes = make(map[int64]bool)
-	}
-	if m.seriesURLs == nil {
-		m.seriesURLs = make(map[int64][]string)
-	}
-	m.mutex.Unlock()
 }
 
 func (m *command) broadcastMessage(ctx *ext.Context, u *ext.Update) error {
 	userId := u.EffectiveUser().ID
 
 	// Verifica si el usuario es admin
-	isAdmin := len(config.ValueOf.AdminIDs) == 0 || utils.Contains(config.ValueOf.AdminIDs, userId)
-	if !isAdmin {
+	if len(config.ValueOf.AdminIDs) != 0 && !utils.Contains(config.ValueOf.AdminIDs, userId) {
 		ctx.Reply(u, "You are not authorized to use /broadcast.", nil)
 		return dispatcher.EndGroups
 	}
@@ -98,10 +84,7 @@ func (m *command) broadcastMessage(ctx *ext.Context, u *ext.Update) error {
 			continue
 		}
 		successCount++
-		// Solo aplicar delay para no admins
-		if !isAdmin {
-			time.Sleep(2 * time.Second) // Anti-flood para no admins
-		}
+		time.Sleep(2 * time.Second) // Anti-flood
 	}
 
 	response := fmt.Sprintf("Broadcast completed:\n- Sent to %d users\n- Failed for %d users", successCount, failureCount)
@@ -212,73 +195,6 @@ func (m *command) sendLink(ctx *ext.Context, u *ext.Update) error {
 		m.log.Sugar().Errorf("Failed to send reply: %v", err)
 		ctx.Reply(u, fmt.Sprintf("Error sending reply: %s", err.Error()), nil)
 	}
-
-	// Si el modo series está activo, agregar el URL a la lista
-	m.mutex.Lock()
-	if m.seriesModes[userId] {
-		m.seriesURLs[userId] = append(m.seriesURLs[userId], streamURL)
-	}
-	m.mutex.Unlock()
-
-	return dispatcher.EndGroups
-}
-
-func (m *command) handleSeries(ctx *ext.Context, u *ext.Update) error {
-	userId := u.EffectiveUser().ID
-
-	// Verifica si el usuario es admin
-	if len(config.ValueOf.AdminIDs) != 0 && !utils.Contains(config.ValueOf.AdminIDs, userId) {
-		ctx.Reply(u, "You are not authorized to use /series.", nil)
-		return dispatcher.EndGroups
-	}
-
-	// Togglea el modo
-	m.mutex.Lock()
-	if m.seriesModes[userId] {
-		// Modo activo: Desactivar y enviar la lista
-		urls := m.seriesURLs[userId]
-		if len(urls) == 0 {
-			ctx.Reply(u, "No files were processed during this series mode.", nil)
-		} else {
-			const maxMessageLength = 4000
-			list := strings.Builder{}
-			list.WriteString("Processed series URLs:\n")
-			for i, url := range urls {
-				line := fmt.Sprintf("%d. %s\n", i+1, url)
-				if list.Len()+len(line) > maxMessageLength {
-					_, err := ctx.Reply(u, list.String(), nil)
-					if err != nil {
-						m.log.Sugar().Errorf("Failed to send partial series URLs: %v", err)
-						ctx.Reply(u, "Error sending series URLs.", nil)
-						m.mutex.Unlock()
-						return dispatcher.EndGroups
-					}
-					list.Reset()
-					list.WriteString("Processed series URLs (continued):\n")
-				}
-				list.WriteString(line)
-			}
-			if list.Len() > len("Processed series URLs (continued):\n") {
-				_, err := ctx.Reply(u, list.String(), nil)
-				if err != nil {
-					m.log.Sugar().Errorf("Failed to send final series URLs: %v", err)
-					ctx.Reply(u, "Error sending series URLs.", nil)
-					m.mutex.Unlock()
-					return dispatcher.EndGroups
-				}
-			}
-		}
-		// Limpiar la lista y desactivar modo
-		m.seriesURLs[userId] = nil
-		m.seriesModes[userId] = false
-	} else {
-		// Modo inactivo: Activar
-		m.seriesModes[userId] = true
-		m.seriesURLs[userId] = []string{}
-		ctx.Reply(u, "Series mode activated. Send files to process. Use /series again to get the list and deactivate.", nil)
-	}
-	m.mutex.Unlock()
-
 	return dispatcher.EndGroups
 }
 
