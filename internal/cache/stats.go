@@ -1,13 +1,15 @@
 package cache
 
 import (
-	"EverythingSuckz/fsb/internal/database"
-	"EverythingSuckz/fsb/internal/types"
 	"fmt"
 	"time"
 
-	"gorm.io/gorm"
+	"EverythingSuckz/fsb/internal/database"
+	"EverythingSuckz/fsb/internal/types"
+
 	"go.uber.org/zap"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type StatsCache struct {
@@ -17,13 +19,13 @@ type StatsCache struct {
 
 var statsCache *StatsCache
 
+// InitStatsCache initializes the global stats singleton
 func InitStatsCache(log *zap.Logger) {
 	log = log.Named("stats_cache")
-	defer log.Sugar().Info("Initialized stats cache")
 	
 	db := database.GetDB()
 	if db == nil {
-		log.Error("Database not initialized")
+		log.Fatal("Database not initialized: cannot start stats cache")
 		return
 	}
 	
@@ -31,54 +33,54 @@ func InitStatsCache(log *zap.Logger) {
 		db:  db,
 		log: log,
 	}
+	log.Info("Stats cache successfully linked to GORM provider")
 }
 
+// GetStatsCache returns the singleton instance
 func GetStatsCache() *StatsCache {
 	return statsCache
 }
 
-// RecordFileProcessed records a file processing event
+// RecordFileProcessed updates daily stats using an atomic Upsert pattern
 func (sc *StatsCache) RecordFileProcessed(fileSize int64) error {
-	today := time.Now().Truncate(24 * time.Hour)
-	
-	var stats types.Stats
-	result := sc.db.Where("date = ?", today).First(&stats)
-	
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
-			// Create new record for today
-			stats = types.Stats{
-				Date:      today,
-				FileCount: 1,
-				TotalSize: fileSize,
-			}
-			return sc.db.Create(&stats).Error
-		}
-		return result.Error
+	if sc == nil || sc.db == nil {
+		return fmt.Errorf("stats cache not initialized")
 	}
-	
-	// Update existing record
-	stats.FileCount++
-	stats.TotalSize += fileSize
-	return sc.db.Save(&stats).Error
+
+	today := time.Now().Truncate(24 * time.Hour)
+
+	// Senior Note: We use OnConflict (Upsert) to handle concurrency safely.
+	// This updates the existing row if the date exists, or creates it if not.
+	err := sc.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "date"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"file_count": gorm.Expr("file_count + ?", 1),
+			"total_size": gorm.Expr("total_size + ?", fileSize),
+		}),
+	}).Create(&types.Stats{
+		Date:      today,
+		FileCount: 1,
+		TotalSize: fileSize,
+	}).Error
+
+	if err != nil {
+		sc.log.Error("Failed to record file processing", zap.Error(err))
+		return err
+	}
+	return nil
 }
 
-// GetTodayStats returns today's statistics
+// GetTodayStats retrieves records for the current UTC day
 func (sc *StatsCache) GetTodayStats() (types.DailyStats, error) {
 	today := time.Now().Truncate(24 * time.Hour)
-	
 	var stats types.Stats
-	result := sc.db.Where("date = ?", today).First(&stats)
 	
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
-			return types.DailyStats{
-				Date:      today,
-				FileCount: 0,
-				TotalSize: 0,
-			}, nil
+	err := sc.db.Where("date = ?", today).First(&stats).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return types.DailyStats{Date: today}, nil
 		}
-		return types.DailyStats{}, result.Error
+		return types.DailyStats{}, err
 	}
 	
 	return types.DailyStats{
@@ -88,22 +90,17 @@ func (sc *StatsCache) GetTodayStats() (types.DailyStats, error) {
 	}, nil
 }
 
-// GetYesterdayStats returns yesterday's statistics
+// GetYesterdayStats retrieves records for the previous UTC day
 func (sc *StatsCache) GetYesterdayStats() (types.DailyStats, error) {
 	yesterday := time.Now().AddDate(0, 0, -1).Truncate(24 * time.Hour)
-	
 	var stats types.Stats
-	result := sc.db.Where("date = ?", yesterday).First(&stats)
 	
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
-			return types.DailyStats{
-				Date:      yesterday,
-				FileCount: 0,
-				TotalSize: 0,
-			}, nil
+	err := sc.db.Where("date = ?", yesterday).First(&stats).Error
+	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return types.DailyStats{Date: yesterday}, nil
 		}
-		return types.DailyStats{}, result.Error
+		return types.DailyStats{}, err
 	}
 	
 	return types.DailyStats{
@@ -113,20 +110,20 @@ func (sc *StatsCache) GetYesterdayStats() (types.DailyStats, error) {
 	}, nil
 }
 
-// GetLastWeekStats returns the last 7 days statistics
+// GetLastWeekStats aggregates data for the rolling last 7 days
 func (sc *StatsCache) GetLastWeekStats() (types.WeeklyStats, error) {
 	endDate := time.Now().Truncate(24 * time.Hour)
 	startDate := endDate.AddDate(0, 0, -7)
 	
 	var result struct {
-		FileCount int64 `gorm:"column:file_count"`
-		TotalSize int64 `gorm:"column:total_size"`
+		FileCount int64
+		TotalSize int64
 	}
 	
 	err := sc.db.Model(&types.Stats{}).
-		Select("COALESCE(SUM(file_count), 0) as file_count, COALESCE(SUM(total_size), 0) as total_size").
+		Select("COALESCE(SUM(file_count), 0), COALESCE(SUM(total_size), 0)").
 		Where("date >= ? AND date < ?", startDate, endDate).
-		Scan(&result).Error
+		Row().Scan(&result.FileCount, &result.TotalSize)
 	
 	if err != nil {
 		return types.WeeklyStats{}, err
@@ -140,16 +137,16 @@ func (sc *StatsCache) GetLastWeekStats() (types.WeeklyStats, error) {
 	}, nil
 }
 
-// GetTotalStats returns all-time statistics
+// GetTotalStats aggregates all-time data
 func (sc *StatsCache) GetTotalStats() (types.DailyStats, error) {
 	var result struct {
-		FileCount int64 `gorm:"column:file_count"`
-		TotalSize int64 `gorm:"column:total_size"`
+		FileCount int64
+		TotalSize int64
 	}
 	
 	err := sc.db.Model(&types.Stats{}).
-		Select("COALESCE(SUM(file_count), 0) as file_count, COALESCE(SUM(total_size), 0) as total_size").
-		Scan(&result).Error
+		Select("COALESCE(SUM(file_count), 0), COALESCE(SUM(total_size), 0)").
+		Row().Scan(&result.FileCount, &result.TotalSize)
 	
 	if err != nil {
 		return types.DailyStats{}, err
@@ -162,27 +159,12 @@ func (sc *StatsCache) GetTotalStats() (types.DailyStats, error) {
 	}, nil
 }
 
-// GetCompleteStats returns all statistics in one call
+// GetCompleteStats returns a unified response for the dashboard
 func (sc *StatsCache) GetCompleteStats() (types.StatisticsResponse, error) {
-	today, err := sc.GetTodayStats()
-	if err != nil {
-		return types.StatisticsResponse{}, fmt.Errorf("failed to get today stats: %w", err)
-	}
-	
-	yesterday, err := sc.GetYesterdayStats()
-	if err != nil {
-		return types.StatisticsResponse{}, fmt.Errorf("failed to get yesterday stats: %w", err)
-	}
-	
-	lastWeek, err := sc.GetLastWeekStats()
-	if err != nil {
-		return types.StatisticsResponse{}, fmt.Errorf("failed to get last week stats: %w", err)
-	}
-	
-	total, err := sc.GetTotalStats()
-	if err != nil {
-		return types.StatisticsResponse{}, fmt.Errorf("failed to get total stats: %w", err)
-	}
+	today, _ := sc.GetTodayStats()
+	yesterday, _ := sc.GetYesterdayStats()
+	lastWeek, _ := sc.GetLastWeekStats()
+	total, _ := sc.GetTotalStats()
 	
 	return types.StatisticsResponse{
 		Today:     today,
@@ -190,4 +172,4 @@ func (sc *StatsCache) GetCompleteStats() (types.StatisticsResponse, error) {
 		LastWeek:  lastWeek,
 		Total:     total,
 	}, nil
-} 
+}
