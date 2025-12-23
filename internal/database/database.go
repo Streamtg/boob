@@ -16,10 +16,11 @@ import (
 	"go.uber.org/zap"
 )
 
+// ValueOf is the globally accessible configuration instance
 var ValueOf = &config{}
 
 type config struct {
-	// Telegram & Network
+	// Telegram & Core
 	APIID           int64    `envconfig:"API_ID" required:"true"`
 	APIHash         string   `envconfig:"API_HASH" required:"true"`
 	BotToken        string   `envconfig:"BOT_TOKEN" required:"true"`
@@ -27,52 +28,89 @@ type config struct {
 	Host            string   `envconfig:"HOST"`
 	Port            int      `envconfig:"PORT" default:"8080"`
 	WorkerURL       string   `envconfig:"WORKER_URL" required:"true"`
-	
-	// Cache Management
-	MaxCacheSize    int64    `envconfig:"MAX_CACHE_SIZE" default:"10737418240"` // 10GB
+
+	// Cache & Storage
+	MaxCacheSize    int64    `envconfig:"MAX_CACHE_SIZE" default:"10737418240"`
 	CacheDirectory  string   `envconfig:"CACHE_DIRECTORY" default:".cache"`
 	
-	// GitHub Persistence Layer
+	// GitHub Persistence
 	GithubOwner     string   `envconfig:"GITHUB_OWNER"`
 	GithubRepo      string   `envconfig:"GITHUB_REPO"`
 	GithubDbPath    string   `envconfig:"GITHUB_DB_PATH" default:"storage/database.json"`
-	GithubToken     string   `envconfig:"GITHUB_TOKEN"` // Critical for API access
-	
-	// Permissions & Other
+	GithubToken     string   `envconfig:"GITHUB_TOKEN"`
+
+	// Permissions & Security
 	AllowedUsers    []int64  `envconfig:"ALLOWED_USERS"`
 	ForceSubChannel string   `envconfig:"FORCE_SUB_CHANNEL"`
 	HashLength      int      `envconfig:"HASH_LENGTH" default:"6"`
 	UsePublicIP     bool     `envconfig:"USE_PUBLIC_IP" default:"false"`
+	
+	// Internal
 	MultiTokens     []string
 }
 
-// ... rest of the helper functions remain the same to maintain build stability ...
+var botTokenRegex = regexp.MustCompile(`MULTI\_TOKEN\d+=(.*)`)
 
-func (c *config) setupEnvVars(log *zap.Logger, cmd *cobra.Command) {
-	c.loadFromEnvFile(log)
+// loadFromEnvFile loads the .env file into the system environment
+func (c *config) loadFromEnvFile(log *zap.Logger) {
+	// Use filepath.Clean for cross-platform compatibility
+	envPath := filepath.Clean(".env")
 	
-	err := envconfig.Process("", c)
-	if err != nil {
-		log.Fatal("Error processing env vars", zap.Error(err))
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		log.Warn(".env file not found, skipping file load and using system environment only")
+		return
 	}
 
-	// Dynamic IP Setup
+	err := godotenv.Load(envPath)
+	if err != nil {
+		log.Fatal("Error loading .env file", zap.Error(err))
+	}
+}
+
+// setupEnvVars orchestrates the loading sequence
+func (c *config) setupEnvVars(log *zap.Logger, cmd *cobra.Command) {
+	// Step 1: Load file into OS environment
+	c.loadFromEnvFile(log)
+
+	// Step 2: Map OS environment to the struct
+	// We use an empty prefix "" to match keys like API_ID directly
+	err := envconfig.Process("", c)
+	if err != nil {
+		log.Fatal("Error processing environment variables via envconfig", zap.Error(err))
+	}
+
+	// Step 3: Handle dynamic network configuration
 	ip, _ := getIP(c.UsePublicIP)
 	if c.Host == "" {
 		c.Host = "http://" + ip + ":" + strconv.Itoa(c.Port)
 	}
+
+	// Step 4: Parse multi-token pattern if exists
+	for _, env := range os.Environ() {
+		if strings.HasPrefix(env, "MULTI_TOKEN") {
+			match := botTokenRegex.FindStringSubmatch(env)
+			if len(match) > 1 {
+				c.MultiTokens = append(c.MultiTokens, match[1])
+			}
+		}
+	}
 }
 
+// Load is the public entry point called from main.go
 func Load(log *zap.Logger, cmd *cobra.Command) {
-	log = log.Named("Config")
+	log = log.Named("config")
 	ValueOf.setupEnvVars(log, cmd)
 	
-	// Normalize LogChannelID
+	// Correct the Log Channel ID format (handling the -100 prefix)
 	ValueOf.LogChannelID = int64(stripInt(log, int(ValueOf.LogChannelID)))
-	log.Info("Host Wave Config Initialized with GitHub Persistence Support")
+	
+	log.Info("Configuration successfully loaded from environment", 
+		zap.String("host", ValueOf.Host),
+		zap.String("worker", ValueOf.WorkerURL))
 }
 
-// Internal IP and Public IP helpers (Your established logic)
+// --- Internal Helper Functions ---
+
 func getIP(public bool) (string, error) {
 	if public { return GetPublicIP() }
 	return getInternalIP()
