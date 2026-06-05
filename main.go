@@ -552,7 +552,8 @@ func main() {
 	cfg.NoUpload = false
 	cfg.Seed = true
 	cfg.SetListenAddr("0.0.0.0:0")
-	cfg.DisableIPv6 = false
+	cfg.DisableIPv6 = true
+	cfg.DisableIPv4 = false
 	cfg.NoDHT = false
 	cfg.DisableTCP = false
 
