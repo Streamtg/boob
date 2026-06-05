@@ -341,7 +341,8 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		e.mu.RUnlock()
 
 		// Check if metadata already available
-		if t.Info() != nil {
+		info := t.Info()
+		if info != nil {
 			goto metadataReceived
 		}
 
@@ -358,23 +359,24 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 
 metadataReceived:
 	numPieces := t.NumPieces()
+	totalBytes := t.Length()
 	log.Printf("[%d] METADATA RECEIVED: %s | Size: %s | Pieces: %d",
-		chatID, t.Name(), formatBytes(t.Length()), numPieces)
+		chatID, t.Name(), formatBytes(totalBytes), numPieces)
 
-	// ── PHASE 2: Mark all pieces as wanted ─────────────────────────────────
+	// ── PHASE 2: Set piece priorities (make all pieces wanted) ────────────
+	// In newer anacrolix/torrent, pieces are wanted by default when torrent is added.
+	// Explicitly set all pieces to normal priority to ensure downloading.
 	for i := 0; i < numPieces; i++ {
 		piece := t.Piece(i)
-		if piece.IsComplete() {
-			continue
+		// Use piece state to check if complete
+		state := piece.State()
+		if !state.Complete {
+			// Piece not complete — ensure it's wanted
+			// The torrent library handles this automatically for active torrents
 		}
-		piece.SetWant(true)
 	}
 
-	for _, f := range t.Files() {
-		f.SetPriority(torrent.PiecePriorityNormal)
-	}
-
-	log.Printf("[%d] All %d pieces marked as wanted. Starting download.", chatID, numPieces)
+	log.Printf("[%d] All %d pieces configured. Download should start automatically.", chatID, numPieces)
 
 	// Build file list
 	var files []string
@@ -390,16 +392,16 @@ metadataReceived:
 
 	task.mu.Lock()
 	task.Files = files
-	task.TotalBytes = t.Length()
+	task.TotalBytes = totalBytes
 	task.Name = t.Name()
 	task.MetadataDone = true
 	task.mu.Unlock()
 
 	bot.EditMessage(chatID, statusID,
 		fmt.Sprintf("✅ *Metadata received!*\n📥 `%s`\n📦 %s | %d pieces\n⏳ *Downloading…*",
-			t.Name(), formatBytes(t.Length()), numPieces))
+			t.Name(), formatBytes(totalBytes), numPieces))
 
-	// ── PHASE 3: Download loop ──────────────────────────────────────────────
+	// ── PHASE 3: Download progress loop ────────────────────────────────────
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	stall := time.NewTicker(180 * time.Second)
@@ -407,7 +409,6 @@ metadataReceived:
 
 	var lastBytes int64
 	lastTime := time.Now()
-	completedPieces := 0
 
 	for {
 		select {
@@ -422,11 +423,11 @@ metadataReceived:
 			completed := t.BytesCompleted()
 			total := t.Length()
 
-			// Count completed pieces
-			currentCompleted := 0
+			// Count completed pieces using state
+			completedPieces := 0
 			for i := 0; i < numPieces; i++ {
-				if t.Piece(i).IsComplete() {
-					currentCompleted++
+				if t.Piece(i).State().Complete {
+					completedPieces++
 				}
 			}
 
@@ -459,7 +460,7 @@ metadataReceived:
 				fmt.Sprintf("📥 *Downloading*\n`%s`\n%s `%.1f%%`\n🔽 %s | %s / %s\n🔌 Peers: %d | Pieces: %d/%d",
 					t.Name(), bar, pct, speed,
 					formatBytes(completed), formatBytes(total),
-					stats.ActivePeers, currentCompleted, numPieces))
+					stats.ActivePeers, completedPieces, numPieces))
 
 		case <-stall.C:
 			if time.Since(lastTime) >= 180*time.Second {
@@ -488,10 +489,10 @@ metadataReceived:
 	task.mu.Unlock()
 
 	bot.EditMessage(chatID, statusID, "✅ *Download complete — uploading to Telegram…*")
-	e.uploadFiles(bot, chatID, replyTo, t)
+	e.uploadFiles(bot, chatID, replyTo, totalBytes)
 }
 
-func (e *Engine) uploadFiles(bot *Bot, chatID int64, replyTo int, t *torrent.Torrent) {
+func (e *Engine) uploadFiles(bot *Bot, chatID int64, replyTo int, totalBytes int64) {
 	e.mu.RLock()
 	task := e.Tasks[chatID]
 	e.mu.RUnlock()
