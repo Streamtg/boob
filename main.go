@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 // ── Telegram Bot (stdlib only) ────────────────────────────────────────────────
@@ -279,7 +280,13 @@ func (e *Engine) Start(bot *Bot, chatID int64, replyTo int, input string) {
 			bot.EditMessage(chatID, statusID, fmt.Sprintf("❌ *Fetch failed:* `%s`", err.Error()))
 			return
 		}
-		t, err := e.Client.AddTorrent(data)
+		mi, err := metainfo.Load(bytes.NewReader(data))
+		if err != nil {
+			e.fail(chatID, fmt.Sprintf("parse error: %v", err))
+			bot.EditMessage(chatID, statusID, fmt.Sprintf("❌ *Parse error:* `%s`", err.Error()))
+			return
+		}
+		t, err := e.Client.AddTorrent(mi)
 		if err != nil {
 			e.fail(chatID, fmt.Sprintf("torrent error: %v", err))
 			bot.EditMessage(chatID, statusID, fmt.Sprintf("❌ *Error:* `%s`", err.Error()))
