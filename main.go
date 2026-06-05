@@ -370,7 +370,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 				return
 			}
 		}
-		}
 
 		if t.BytesCompleted() >= t.Length() {
 			break
