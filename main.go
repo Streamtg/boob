@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -38,25 +39,35 @@ func NewBot(token string) *Bot {
 }
 
 func (b *Bot) api(method string, params map[string]string) ([]byte, error) {
-	url := b.baseURL + "/" + method
+	// Build URL properly: .../method?param1=val1&param2=val2
+	reqURL := b.baseURL + "/" + method
 	if len(params) > 0 {
+		q := url.Values{}
 		for k, v := range params {
-			url += "&" + k + "=" + v
+			q.Set(k, v)
 		}
+		reqURL = b.baseURL + "/" + method + "?" + q.Encode()
 	}
-	resp, err := b.client.Get(url)
+	log.Printf("📡 API: %s", reqURL)
+
+	resp, err := b.client.Get(reqURL)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("📥 Response (%d bytes): %s", len(data), string(data))
+	return data, nil
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type Update struct {
 	UpdateID      int `json:"update_id"`
-	Message       struct {
+	Message       *struct {
 		MessageID int    `json:"message_id"`
 		Chat      struct {
 			ID int64 `json:"id"`
@@ -120,7 +131,7 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 	}
 	json.Unmarshal(data, &r)
 	if !r.OK {
-		return 0, fmt.Errorf("api error")
+		return 0, fmt.Errorf("api error: %s", string(data))
 	}
 	return r.Result.MessageID, nil
 }
@@ -215,6 +226,8 @@ func NewEngine(tc *torrent.Client, storage string) *Engine {
 }
 
 func (e *Engine) Handle(bot *Bot, chatID int64, replyTo int, text string) {
+	log.Printf("[%d] ▶️  processing: %q", chatID, text)
+
 	switch text {
 	case "/cancel":
 		e.cmdCancel(bot, chatID, replyTo)
@@ -364,7 +377,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	task.TotalBytes = t.Length()
 	task.mu.Unlock()
 
-	// Use DownloadAll() to start downloading all pieces
 	t.DownloadAll()
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -374,8 +386,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 
 	var lastBytes int64
 	lastTime := time.Now()
-
-	// Capture total before the loop so it's in scope below
 	total := t.Length()
 
 	for {
@@ -547,7 +557,6 @@ func main() {
 
 	os.MkdirAll(storage, 0755)
 
-	// Use NewDefaultClientConfig() instead of torrent.Config
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = storage
 	cfg.NoUpload = false
@@ -608,45 +617,39 @@ func main() {
 		}
 		json.Unmarshal(data, &ups)
 
+		if !ups.OK {
+			log.Printf("⚠️  API error, result: %s", string(data))
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
 		if len(ups.Result) == 0 {
-			time.Sleep(1 * time.Second)
 			continue
 		}
 
 		for _, u := range ups.Result {
 			offset = u.UpdateID + 1
 
-			var chatID int64
-			var text string
-			var replyTo int
-
-			// Check if Message was populated from JSON (non-zero MessageID means struct exists)
-			if u.Message.MessageID != 0 {
-				chatID = u.Message.Chat.ID
-				text = u.Message.Text
+			if u.Message != nil {
+				chatID := u.Message.Chat.ID
+				text := u.Message.Text
 				if text == "" {
 					text = u.Message.Caption
 				}
-				replyTo = u.Message.MessageID
+				replyTo := u.Message.MessageID
+
+				if text != "" {
+					log.Printf("[%d] ▶️  %q (reply:%d)", chatID, text, replyTo)
+					go engine.Handle(bot, chatID, replyTo, text)
+				}
 			} else if u.CallbackQuery != nil {
-				chatID = u.CallbackQuery.Message.Chat.ID
-				text = u.CallbackQuery.Data
-				replyTo = u.CallbackQuery.Message.MessageID
+				chatID := u.CallbackQuery.Message.Chat.ID
+				text := u.CallbackQuery.Data
+				replyTo := u.CallbackQuery.Message.MessageID
 				bot.answerCallback(u.CallbackQuery.ID)
-			} else {
-				log.Printf("⚠️  update %d has no handleable content", u.UpdateID)
-				continue
+				log.Printf("[%d] ▶️  callback %q", chatID, text)
+				go engine.Handle(bot, chatID, replyTo, text)
 			}
-
-			if text == "" {
-				log.Printf("⚠️  empty text from chat %d update %d", chatID, u.UpdateID)
-				continue
-			}
-
-			log.Printf("[%d] ▶️  %q (reply:%d)", chatID, text, replyTo)
-			go func(chat int64, body string, reply int) {
-				engine.Handle(bot, chat, reply, body)
-			}(chatID, text, replyTo)
 		}
 	}
 }
