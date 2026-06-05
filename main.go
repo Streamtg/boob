@@ -30,7 +30,11 @@ type Bot struct {
 }
 
 func NewBot(token string) *Bot {
-	return &Bot{token: token, baseURL: "https://api.telegram.org/bot" + token, client: &http.Client{Timeout: 30 * time.Second}}
+	return &Bot{
+		token:   token,
+		baseURL: "https://api.telegram.org/bot" + token,
+		client:  &http.Client{Timeout: 30 * time.Second},
+	}
 }
 
 func (b *Bot) get(method string, params map[string]string) ([]byte, error) {
@@ -98,7 +102,11 @@ func (b *Bot) sendDocument(chatID int64, filePath string, replyTo int) error {
 }
 
 func (b *Bot) SendMessage(chatID int64, text string, replyTo int, md bool) (int, error) {
-	req := map[string]interface{}{"chat_id": chatID, "text": text, "reply_to_message_id": replyTo}
+	req := map[string]interface{}{
+		"chat_id":             chatID,
+		"text":                text,
+		"reply_to_message_id": replyTo,
+	}
 	if md {
 		req["parse_mode"] = "Markdown"
 	}
@@ -127,11 +135,16 @@ func (b *Bot) EditMessage(chatID int64, msgID int, text string) {
 }
 
 func (b *Bot) ChatAction(chatID int64, action string) {
-	b.postJSON("sendChatAction", map[string]interface{}{"chat_id": chatID, "action": action})
+	b.postJSON("sendChatAction", map[string]interface{}{
+		"chat_id": chatID,
+		"action":  action,
+	})
 }
 
 func (b *Bot) AnswerCB(queryID string) {
-	b.postJSON("answerCallbackQuery", map[string]interface{}{"callback_query_id": queryID})
+	b.postJSON("answerCallbackQuery", map[string]interface{}{
+		"callback_query_id": queryID,
+	})
 }
 
 // ── Update types ──────────────────────────────────────────────────────────────
@@ -450,7 +463,8 @@ func isMagnet(s string) bool {
 
 func isTorrentURL(s string) bool {
 	s = strings.TrimSpace(s)
-	return (strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")) && strings.HasSuffix(s, ".torrent")
+	return (strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")) &&
+		strings.HasSuffix(s, ".torrent")
 }
 
 func fetchURL(url string) ([]byte, error) {
