@@ -61,7 +61,8 @@ type Update struct {
 		Chat      struct {
 			ID int64 `json:"id"`
 		} `json:"chat"`
-		Text string `json:"text"`
+		Text    string `json:"text"`
+		Caption string `json:"caption"`
 	} `json:"message"`
 	CallbackQuery *struct {
 		ID      string `json:"id"`
@@ -592,7 +593,7 @@ func main() {
 	offset := 0
 	for {
 		data, err := bot.api("getUpdates", map[string]string{
-			"timeout": "60",
+			"timeout": "70",
 			"offset":  strconv.Itoa(offset),
 		})
 		if err != nil {
@@ -607,6 +608,11 @@ func main() {
 		}
 		json.Unmarshal(data, &ups)
 
+		if len(ups.Result) == 0 {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
 		for _, u := range ups.Result {
 			offset = u.UpdateID + 1
 
@@ -614,10 +620,13 @@ func main() {
 			var text string
 			var replyTo int
 
-			// Message is a struct, not a pointer — check if Text is non-empty
-			if u.Message.Text != "" {
+			// Check if Message was populated from JSON (non-zero MessageID means struct exists)
+			if u.Message.MessageID != 0 {
 				chatID = u.Message.Chat.ID
 				text = u.Message.Text
+				if text == "" {
+					text = u.Message.Caption
+				}
 				replyTo = u.Message.MessageID
 			} else if u.CallbackQuery != nil {
 				chatID = u.CallbackQuery.Message.Chat.ID
@@ -625,16 +634,19 @@ func main() {
 				replyTo = u.CallbackQuery.Message.MessageID
 				bot.answerCallback(u.CallbackQuery.ID)
 			} else {
+				log.Printf("⚠️  update %d has no handleable content", u.UpdateID)
 				continue
 			}
 
+			if text == "" {
+				log.Printf("⚠️  empty text from chat %d update %d", chatID, u.UpdateID)
+				continue
+			}
+
+			log.Printf("[%d] ▶️  %q (reply:%d)", chatID, text, replyTo)
 			go func(chat int64, body string, reply int) {
 				engine.Handle(bot, chat, reply, body)
 			}(chatID, text, replyTo)
-		}
-
-		if len(ups.Result) == 0 {
-			time.Sleep(1 * time.Second)
 		}
 	}
 }
