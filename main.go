@@ -33,7 +33,7 @@ func NewBot(token string) *Bot {
 	return &Bot{
 		token:   token,
 		baseURL: "https://api.telegram.org/bot" + token,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  &http.Client{Timeout: 70 * time.Second}, // ← 70s > Telegram 60s polling
 	}
 }
 
@@ -244,7 +244,8 @@ func (e *Engine) Status(bot *Bot, chatID int64, replyTo int) {
 	} else if t.Done {
 		bot.SendMessage(chatID, fmt.Sprintf("✅ *Completed:* `%s`", name), replyTo, true)
 	} else {
-		bot.SendMessage(chatID, fmt.Sprintf("⏳ *Downloading:* `%s`\n📊 `%.1f%%` | ⏱ %s", name, pct, time.Since(started).Round(time.Second)), replyTo, true)
+		elapsed := time.Since(started).Round(time.Second)
+		bot.SendMessage(chatID, fmt.Sprintf("⏳ *Downloading:* `%s`\n📊 `%.1f%%` | ⏱ %s", name, pct, elapsed), replyTo, true)
 	}
 }
 
@@ -311,9 +312,33 @@ func (e *Engine) Start(bot *Bot, chatID int64, replyTo int, input string) {
 }
 
 func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.Torrent, statusID int) {
-	defer func() { recover() }()
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[%d] panic: %v", chatID, r)
+		}
+	}()
 
-	<-t.GotInfo()
+	// Wait for metadata (info dict) — this requires peers!
+	infoCh := t.GotInfo()
+	metadataTimeout := time.After(60 * time.Second)
+
+	select {
+	case <-infoCh:
+		// Metadata received ✓
+		log.Printf("[%d] Metadata received: %s", chatID, t.Name())
+	case <-metadataTimeout:
+		// No peers after 60s — try to get peers manually
+		log.Printf("[%d] No peers after 60s — requesting peers manually", chatID)
+		e.mu.RLock()
+		task := e.Tasks[chatID]
+		e.mu.RUnlock()
+		if task != nil {
+			bot.EditMessage(chatID, statusID, "⏳ *Getting peers…*\nPeers not found yet, still trying…")
+		}
+		// Wait indefinitely for metadata (don't timeout here)
+		<-infoCh
+		log.Printf("[%d] Metadata received (delayed): %s", chatID, t.Name())
+	}
 
 	var files []string
 	for _, f := range t.Files() {
@@ -332,11 +357,13 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	task.Name = t.Name()
 	task.mu.Unlock()
 
-	bot.EditMessage(chatID, statusID, fmt.Sprintf("📥 *Added:* `%s`\n⏳ *Waiting for peers…*", t.Name()))
+	bot.EditMessage(chatID, statusID,
+		fmt.Sprintf("📥 *Added:* `%s`\n📦 Size: %s\n⏳ *Downloading…*",
+			t.Name(), formatBytes(t.Length())))
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	stall := time.NewTicker(90 * time.Second)
+	stall := time.NewTicker(120 * time.Second)
 	defer stall.Stop()
 
 	var lastBytes int64
@@ -376,16 +403,22 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 
 			bar := progressBar(int(pct), 20)
 			bot.EditMessage(chatID, statusID,
-				fmt.Sprintf("📥 *Downloading*\n`%s`\n%s `%.1f%%`\n🔽 %s | %s / %s",
-					t.Name(), bar, pct, speed, formatBytes(completed), formatBytes(total)))
+				fmt.Sprintf("📥 *Downloading*\n`%s`\n%s `%.1f%%`\n🔽 %s | %s / %s\nPeers: %d/%d",
+					t.Name(), bar, pct, speed,
+					formatBytes(completed), formatBytes(total),
+					t.Stats().ActivePeers, t.Stats().TotalPeers))
 
 		case <-stall.C:
-			if time.Since(lastTime) >= 90*time.Second {
+			if time.Since(lastTime) >= 120*time.Second {
 				e.mu.RLock()
 				exists := e.Tasks[chatID] != nil
 				e.mu.RUnlock()
 				if exists {
-					bot.EditMessage(chatID, statusID, "❌ *Stalled — no data for 90s.*")
+					// Show stats for debugging
+					stats := t.Stats()
+					bot.EditMessage(chatID, statusID,
+						fmt.Sprintf("⏸ *Slow/Stalled*\nPeers: %d | Data: %s\nRetrying…",
+							stats.TotalPeers, formatBytes(t.BytesCompleted())))
 				}
 				return
 			}
@@ -537,8 +570,31 @@ func main() {
 	}
 	os.MkdirAll(storage, 0755)
 
+	// ── Torrent client with DHT bootstrap nodes ────────────────────────────
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = storage
+
+	// DHT bootstrap nodes — help find peers faster
+	cfg.DHTBootstrapNodes = []string{
+		"router.bittorrent.com:6881",
+		"dht.aelitis.com:6881",
+		"router.utorrent.com:6881",
+		"dht.transmissionbt.com:6881",
+		"bt2.TrackersList.com",
+	}
+
+	// More DHT peers for better connectivity
+	cfg.DHTPeers = 50
+
+	// Public trackers (fallback for getting peers)
+	cfg.Trackers = []string{
+		"udp://tracker.opentrackr.org:1337/announce",
+		"udp://tracker.torrent.eu.org:451/announce",
+		"udp://tracker.dm323.com:6969/announce",
+		"http://tracker.skyts.net:8000/announce",
+		"https://tracker.lilithraws.cf:443/announce",
+		"http://nyaa.tracker.wf:7777/announce",
+	}
 
 	tc, err := torrent.NewClient(cfg)
 	if err != nil {
@@ -546,6 +602,7 @@ func main() {
 	}
 	defer tc.Close()
 	log.Printf("✅  Torrent client ready. Storage: %s", storage)
+	log.Printf("✅  DHT bootstrap nodes: %d", len(cfg.DHTBootstrapNodes))
 
 	bot := NewBot(token)
 	body, err := bot.get("getMe", nil)
@@ -572,10 +629,13 @@ func main() {
 
 	offset := 0
 	for {
-		body, err := bot.get("getUpdates", map[string]string{"timeout": "60", "offset": strconv.Itoa(offset)})
+		body, err := bot.get("getUpdates", map[string]string{
+			"timeout": "60",
+			"offset":  strconv.Itoa(offset),
+		})
 		if err != nil {
-			log.Printf("⚠️  getUpdates: %v", err)
-			time.Sleep(5 * time.Second)
+			log.Printf("⚠️  getUpdates timeout (normal if no messages) — retrying")
+			time.Sleep(3 * time.Second)
 			continue
 		}
 
