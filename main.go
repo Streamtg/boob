@@ -173,14 +173,16 @@ type CallbackPayload struct {
 // ── Task ──────────────────────────────────────────────────────────────────────
 
 type Task struct {
-	Name       string
-	Progress   float64
-	Done       bool
-	Files      []string
-	TotalBytes int64
-	Error      string
-	StartedAt  time.Time
-	mu         sync.RWMutex
+	Name           string
+	Progress       float64
+	Done           bool
+	Files          []string
+	TotalBytes     int64
+	Error          string
+	StartedAt      time.Time
+	MetadataDone   bool
+	WaitedMetadata time.Duration
+	mu             sync.RWMutex
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -225,7 +227,11 @@ Send me a magnet link or .torrent URL and I'll download & upload it here.
 
 *Supported:*
 • Magnet links (magnet:?xt=…)
-• .torrent URLs (https://…/file.torrent)`, replyTo, true)
+• .torrent URLs (https://…/file.torrent)
+
+*Note:*
+Magnet links may take 1-3 minutes to start
+as it needs to find peers via DHT/trackers.`, replyTo, true)
 }
 
 func (e *Engine) Status(bot *Bot, chatID int64, replyTo int) {
@@ -238,11 +244,15 @@ func (e *Engine) Status(bot *Bot, chatID int64, replyTo int) {
 	}
 	t.mu.RLock()
 	pct, name, errMsg, started := t.Progress, t.Name, t.Error, t.StartedAt
+	metaDone := t.MetadataDone
 	t.mu.RUnlock()
 	if errMsg != "" {
 		bot.SendMessage(chatID, fmt.Sprintf("❌ *Error:* `%s`", errMsg), replyTo, true)
 	} else if t.Done {
 		bot.SendMessage(chatID, fmt.Sprintf("✅ *Completed:* `%s`", name), replyTo, true)
+	} else if !metaDone {
+		elapsed := time.Since(started).Round(time.Second)
+		bot.SendMessage(chatID, fmt.Sprintf("⏳ *Getting metadata…*\n⏱ Waiting: %s\n\n*Tip:* Magnet links need peers to send metadata.\nPopular torrents start faster.", elapsed), replyTo, true)
 	} else {
 		elapsed := time.Since(started).Round(time.Second)
 		bot.SendMessage(chatID, fmt.Sprintf("⏳ *Downloading:* `%s`\n📊 `%.1f%%` | ⏱ %s", name, pct, elapsed), replyTo, true)
@@ -271,7 +281,7 @@ func (e *Engine) Start(bot *Bot, chatID int64, replyTo int, input string) {
 	e.Tasks[chatID] = &Task{StartedAt: time.Now()}
 	e.mu.Unlock()
 
-	statusID, _ := bot.SendMessage(chatID, "⏳ *Starting download…*", replyTo, true)
+	statusID, _ := bot.SendMessage(chatID, "⏳ *Starting download…*\n\nIf magnet link: waiting for metadata via DHT (can take 1-3 min)…", replyTo, true)
 
 	if isMagnet(input) {
 		clean := strings.TrimSpace(input)
@@ -318,25 +328,67 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		}
 	}()
 
-	// Wait for metadata (info dict) — requires peers!
-	infoCh := t.GotInfo()
-	metadataTimeout := time.After(60 * time.Second)
+	// ── PHASE 1: Wait for metadata (critical for magnet links) ─────────────
+	metadataStart := time.Now()
+	metadataTick := time.NewTicker(10 * time.Second)
+	defer metadataTick.Stop()
 
-	select {
-	case <-infoCh:
-		log.Printf("[%d] Metadata received: %s", chatID, t.Name())
-	case <-metadataTimeout:
-		log.Printf("[%d] No peers after 60s — waiting indefinitely", chatID)
-		e.mu.RLock()
-		task := e.Tasks[chatID]
-		e.mu.RUnlock()
-		if task != nil {
-			bot.EditMessage(chatID, statusID, "⏳ *Waiting for peers…*\nMetadata not yet received, still trying…")
+	// Update status every 10s while waiting for metadata
+	metadataStatusTick := time.NewTicker(30 * time.Second)
+	defer metadataStatusTick.Stop()
+
+	log.Printf("[%d] Waiting for metadata... Peers: %d", chatID, t.Stats().ActivePeers)
+
+	for {
+		select {
+		case <-metadataTick.C:
+			stats := t.Stats()
+			waited := time.Since(metadataStart).Round(time.Second)
+			log.Printf("[%d] Metadata wait: %s | Peers: %d/%d | Data: %s",
+				chatID, waited, stats.ActivePeers, stats.TotalPeers, formatBytes(t.BytesCompleted()))
+
+		case <-metadataStatusTick.C:
+			e.mu.RLock()
+			task := e.Tasks[chatID]
+			e.mu.RUnlock()
+			if task != nil {
+				waited := time.Since(metadataStart).Round(time.Second)
+				stats := t.Stats()
+				bot.EditMessage(chatID, statusID,
+					fmt.Sprintf("⏳ *Getting metadata…*\n⏱ Waiting: %s\n🔌 Peers found: %d\n📦 Data received: %s\n\n*Torrents with more seeders start faster.*", waited, stats.TotalPeers, formatBytes(t.BytesCompleted())))
+			}
+
+		default:
+			// Check if metadata arrived
+			select {
+			case <-t.GotInfo():
+				goto metadataReceived
+			default:
+			}
+
+			// Check if task was cancelled
+			e.mu.RLock()
+			cancelled := e.Tasks[chatID] == nil
+			e.mu.RUnlock()
+			if cancelled {
+				log.Printf("[%d] Task cancelled during metadata wait", chatID)
+				return
+			}
+
+			// Check if we already have metadata (some torrents come with it)
+			if t.Info() != nil {
+				goto metadataReceived
+			}
+
+			// Small sleep to avoid busy loop
+			time.Sleep(200 * time.Millisecond)
 		}
-		<-infoCh
-		log.Printf("[%d] Metadata received (delayed): %s", chatID, t.Name())
 	}
 
+metadataReceived:
+	log.Printf("[%d] Metadata received! Name: %s Size: %s", chatID, t.Name(), formatBytes(t.Length()))
+
+	// ── PHASE 2: Download files ─────────────────────────────────────────────
 	var files []string
 	for _, f := range t.Files() {
 		if f.Path() != "" {
@@ -352,15 +404,16 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	task.Files = files
 	task.TotalBytes = t.Length()
 	task.Name = t.Name()
+	task.MetadataDone = true
 	task.mu.Unlock()
 
 	bot.EditMessage(chatID, statusID,
-		fmt.Sprintf("📥 *Added:* `%s`\n📦 Size: %s\n⏳ *Downloading…*",
+		fmt.Sprintf("✅ *Metadata received!*\n📥 *%s*\n📦 Size: %s\n⏳ *Starting download…*",
 			t.Name(), formatBytes(t.Length())))
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	stall := time.NewTicker(120 * time.Second)
+	stall := time.NewTicker(180 * time.Second)
 	defer stall.Stop()
 
 	var lastBytes int64
@@ -398,24 +451,22 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 				lastTime = time.Now()
 			}
 
-			bar := progressBar(int(pct), 20)
 			stats := t.Stats()
+			bar := progressBar(int(pct), 20)
 			bot.EditMessage(chatID, statusID,
-				fmt.Sprintf("📥 *Downloading*\n`%s`\n%s `%.1f%%`\n🔽 %s | %s / %s\nPeers: %d/%d",
+				fmt.Sprintf("📥 *Downloading*\n`%s`\n%s `%.1f%%`\n🔽 %s | %s / %s\n🔌 Peers: %d",
 					t.Name(), bar, pct, speed,
 					formatBytes(completed), formatBytes(total),
-					stats.ActivePeers, stats.TotalPeers))
+					stats.ActivePeers))
 
 		case <-stall.C:
-			if time.Since(lastTime) >= 120*time.Second {
+			if time.Since(lastTime) >= 180*time.Second {
 				e.mu.RLock()
 				exists := e.Tasks[chatID] != nil
 				e.mu.RUnlock()
 				if exists {
-					stats := t.Stats()
 					bot.EditMessage(chatID, statusID,
-						fmt.Sprintf("⏸ *Slow/Stalled*\nPeers: %d | Data: %s\nRetrying…",
-							stats.ActivePeers, formatBytes(t.BytesCompleted())))
+						fmt.Sprintf("⏸ *Slow or stalled*\nData: %s / %s\nRetrying…", formatBytes(t.BytesCompleted()), formatBytes(t.Length())))
 				}
 				return
 			}
