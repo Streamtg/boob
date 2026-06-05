@@ -270,9 +270,6 @@ func (e *Engine) cmdCancel(bot *Bot, chatID int64, replyTo int) {
 	t := e.tasks[chatID]
 	e.mu.Unlock()
 
-	// Drop torrent from client
-	e.tc.DropTorrent(t.Name)
-
 	e.mu.Lock()
 	delete(e.tasks, chatID)
 	e.mu.Unlock()
@@ -314,7 +311,7 @@ func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input 
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
 	e.mu.Unlock()
 
-	statusID, err := bot.sendMsg(chatID, "⏳ *Starting download…*", replyTo, true)
+	_, err := bot.sendMsg(chatID, "⏳ *Starting download…*", replyTo, true)
 	if err != nil {
 		log.Printf("[%d] failed to send start message: %v", chatID, err)
 	}
@@ -389,7 +386,7 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	info := t.Info()
 	name := t.Name()
 	if info != nil {
-		name = info.DisplayName
+		name = info.Name
 	}
 	total := t.Length()
 
