@@ -333,7 +333,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		if task != nil {
 			bot.EditMessage(chatID, statusID, "⏳ *Waiting for peers…*\nMetadata not yet received, still trying…")
 		}
-		// Continue waiting for metadata indefinitely
 		<-infoCh
 		log.Printf("[%d] Metadata received (delayed): %s", chatID, t.Name())
 	}
@@ -402,10 +401,10 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 			bar := progressBar(int(pct), 20)
 			stats := t.Stats()
 			bot.EditMessage(chatID, statusID,
-				fmt.Sprintf("📥 *Downloading*\n`%s`\n%s `%.1f%%`\n🔽 %s | %s / %s\nPeers: %d | Seeds: %d",
+				fmt.Sprintf("📥 *Downloading*\n`%s`\n%s `%.1f%%`\n🔽 %s | %s / %s\nPeers: %d/%d",
 					t.Name(), bar, pct, speed,
 					formatBytes(completed), formatBytes(total),
-					stats.ActivePeers, stats.TotalSeeds))
+					stats.ActivePeers, stats.TotalPeers))
 
 		case <-stall.C:
 			if time.Since(lastTime) >= 120*time.Second {
@@ -415,8 +414,8 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 				if exists {
 					stats := t.Stats()
 					bot.EditMessage(chatID, statusID,
-						fmt.Sprintf("⏸ *Slow/Stalled*\nPeers: %d | Seeds: %d | Data: %s\nRetrying…",
-							stats.ActivePeers, stats.TotalSeeds, formatBytes(t.BytesCompleted())))
+						fmt.Sprintf("⏸ *Slow/Stalled*\nPeers: %d | Data: %s\nRetrying…",
+							stats.ActivePeers, formatBytes(t.BytesCompleted())))
 				}
 				return
 			}
@@ -570,9 +569,6 @@ func main() {
 
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = storage
-
-	// Increase max peers for better connectivity
-	cfg.MaxPeers = 100
 
 	tc, err := torrent.NewClient(cfg)
 	if err != nil {
