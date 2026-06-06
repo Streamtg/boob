@@ -22,10 +22,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Bot API con soporte a archivos grandes
-// ─────────────────────────────────────────────────────────────────────────────
-
 type Bot struct {
 	token     string
 	baseURL   string
@@ -162,7 +158,7 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-// ✅ Subir archivo sin límite de tamaño (funciona con archivos grandes)
+// ✅ Subir archivo sin límite de tamaño
 func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -180,7 +176,6 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 
 	log.Printf("[%d] 📤 Subiendo: %s (%s)", chatID, filename, formatBytes(fileSize))
 
-	// Crear multipart con timeout largo
 	client := &http.Client{
 		Timeout: 30 * time.Minute,
 		Transport: &http.Transport{
@@ -208,17 +203,8 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 			return
 		}
 
-		// Leer en chunks de 1MB
 		buf := make([]byte, 1024*1024)
 		lastProgress := int64(0)
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		go func() {
-			for range ticker.C {
-				// Log de progreso (opcional)
-			}
-		}()
 
 		for {
 			n, readErr := file.Read(buf)
@@ -256,7 +242,6 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	// Reintentos para conexiones inestables
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		resp, err := client.Do(req)
@@ -290,7 +275,7 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 
 		if !result.OK {
 			if result.ErrorCode == 413 {
-				return fmt.Errorf("archivo demasiado grande para esta cuenta")
+				return fmt.Errorf("archivo demasiado grande")
 			}
 			lastErr = fmt.Errorf("upload error: %s", result.Description)
 			if attempt < 2 {
@@ -306,10 +291,6 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 
 	return lastErr
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Engine
-// ─────────────────────────────────────────────────────────────────────────────
 
 type Task struct {
 	Name       string
@@ -514,6 +495,7 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	defer ticker.Stop()
 
 	var lastBytes int64
+	// ✅ FIX 1: Usar lastTime
 	lastTime := time.Now()
 
 loop:
@@ -655,7 +637,6 @@ func (e *Engine) saveAndUploadFile(
 
 	log.Printf("[%d] 💾 guardado: %s", chatID, fullPath)
 
-	// ✅ Subir sin límite de tamaño
 	err = bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
 	if err != nil {
 		log.Printf("[%d] upload error: %v", chatID, err)
@@ -709,14 +690,16 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 			continue
 		}
 
-		if e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName) {
+		// ✅ FIX 2: Capturar ambos valores (bool, error)
+		success, err := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName)
+		if success {
 			ok++
 			bot.sendMsg(targetChat,
 				fmt.Sprintf("✅ *Subido:* `%s`", safeName), 0, true)
 		} else {
 			fail++
 			bot.sendMsg(targetChat,
-				fmt.Sprintf("❌ *Falló:* `%s`", safeName), 0, true)
+				fmt.Sprintf("❌ *Falló:* `%s` - %v", safeName, err), 0, true)
 		}
 
 		time.Sleep(3 * time.Second)
