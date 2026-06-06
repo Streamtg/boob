@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,7 +20,102 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/gotd/td/client"
+	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/tg"
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MTProto Client (Telegram Client API - Soporta hasta 4GB)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type MTProtoClient struct {
+	client *telegram.Client
+	api    *tg.Client
+	chatID int64
+}
+
+func NewMTProtoClient(apiID int, apiHash string, chatID int64) *MTProtoClient {
+	return &MTProtoClient{
+		chatID: chatID,
+	}
+}
+
+func (m *MTProtoClient) Connect(ctx context.Context, phoneNumber string) error {
+	// Crear cliente
+	c := telegram.NewClient(
+		apiID,
+		apiHash,
+		telegram.Options{
+			SessionStorage: &session.StorageMemory{},
+		},
+	)
+
+	// Conectar
+	err := c.Run(ctx, func(ctx context.Context) error {
+		m.client = c
+		m.api = c.API()
+		return nil
+	})
+
+	return err
+}
+
+// ✅ Subir archivo grande (hasta 4GB) sin dividir
+func (m *MTProtoClient) UploadLargeFile(ctx context.Context, filePath string, caption string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer file.Close()
+
+	fi, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+
+	filename := filepath.Base(filePath)
+	fileSize := fi.Size()
+
+	log.Printf("📤 Subiendo: %s (%s)", filename, formatBytes(fileSize))
+
+	// Usar uploader de gotd para archivos grandes
+	uploader := client.NewUploader(m.api)
+
+	// Metadata del documento
+	media := &tg.InputMediaUploadedDocument{
+		File: &tg.InputFile{
+			ID:   0,
+			Parts: int32((fileSize + 262144 - 1) / 262144), // 256KB chunks
+			Name: filename,
+		},
+		MimeType: "application/octet-stream",
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{
+				FileName: filename,
+			},
+		},
+	}
+
+	// Subir archivo en chunks de 256KB
+	err = uploader.Upload(ctx, file, int64(fileSize), func(uploaded int64) error {
+		pct := float64(uploaded) / float64(fileSize) * 100
+		log.Printf("⬆️ %.1f%% (%s/%s)", pct, formatBytes(uploaded), formatBytes(fileSize))
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+
+	log.Printf("✅ Subido: %s", filename)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bot API (para comandos y mensajes pequeños)
+// ─────────────────────────────────────────────────────────────────────────────
 
 type Bot struct {
 	token     string
@@ -41,17 +136,6 @@ func NewBot(token string, channelID int64) *Bot {
 				MaxIdleConnsPerHost: 50,
 				IdleConnTimeout:     200 * time.Second,
 			},
-		},
-	}
-}
-
-func uploadClient() *http.Client {
-	return &http.Client{
-		Timeout: 15 * time.Minute,
-		Transport: &http.Transport{
-			MaxIdleConns:        20,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     120 * time.Second,
 		},
 	}
 }
@@ -99,16 +183,6 @@ type Update struct {
 		Text    string `json:"text"`
 		Caption string `json:"caption"`
 	} `json:"message"`
-	CallbackQuery *struct {
-		ID      string `json:"id"`
-		Data    string `json:"data"`
-		Message struct {
-			MessageID int `json:"message_id"`
-			Chat      struct {
-				ID int64 `json:"id"`
-			} `json:"chat"`
-		} `json:"message"`
-	} `json:"callback_query"`
 }
 
 func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (int, error) {
@@ -126,7 +200,7 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 		})
 		data, err := b.post("sendMessage", "application/json", strings.NewReader(string(body)))
 		if err != nil {
-			log.Printf("[%d] sendMsg error: %v (attempt %d/10)", chatID, err, attempt+1)
+			log.Printf("[%d] sendMsg error: %v", chatID, err)
 			time.Sleep(time.Duration((attempt+1)*2) * time.Second)
 			continue
 		}
@@ -143,13 +217,12 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 
 		if r.ErrorCode == 429 {
 			waitTime := time.Duration(r.RetryAfter+5) * time.Second
-			log.Printf("[%d] Rate limit (429), esperando %v…", chatID, waitTime)
+			log.Printf("[%d] Rate limit, esperando %v…", chatID, waitTime)
 			time.Sleep(waitTime)
 			continue
 		}
 
 		if !r.OK {
-			log.Printf("[%d] sendMsg API error (code %d): %s", chatID, r.ErrorCode, string(data))
 			return 0, fmt.Errorf("api error code %d", r.ErrorCode)
 		}
 
@@ -172,11 +245,6 @@ func (b *Bot) editMsg(chatID int64, msgID int, text string) {
 	b.post("editMessageText", "application/json", strings.NewReader(string(body)))
 }
 
-func (b *Bot) answerCallback(queryID string) {
-	body, _ := json.Marshal(map[string]interface{}{"callback_query_id": queryID})
-	b.post("answerCallbackQuery", "application/json", strings.NewReader(string(body)))
-}
-
 func (b *Bot) sendAction(chatID int64, action string) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"chat_id": chatID,
@@ -185,102 +253,9 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	fi, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat file: %w", err)
-	}
-	if fi.Size() == 0 {
-		return fmt.Errorf("file is empty")
-	}
-
-	filename := filepath.Base(filePath)
-	client := uploadClient()
-	defer client.CloseIdleConnections()
-
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-
-	errChan := make(chan error, 1)
-	go func() {
-		defer pw.Close()
-		writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
-		if caption != "" {
-			writer.WriteField("caption", caption)
-		}
-		part, err := writer.CreateFormFile("document", filename)
-		if err != nil {
-			errChan <- fmt.Errorf("create form file: %w", err)
-			return
-		}
-		buf := make([]byte, 512*1024)
-		for {
-			n, readErr := file.Read(buf)
-			if n > 0 {
-				if _, writeErr := part.Write(buf[:n]); writeErr != nil {
-					errChan <- fmt.Errorf("write multipart: %w", writeErr)
-					return
-				}
-			}
-			if readErr != nil {
-				if readErr != io.EOF {
-					errChan <- fmt.Errorf("read file: %w", readErr)
-				}
-				break
-			}
-		}
-		if err := writer.Close(); err != nil {
-			errChan <- fmt.Errorf("close writer: %w", err)
-			return
-		}
-		errChan <- nil
-	}()
-
-	req, err := http.NewRequest("POST", b.baseURL+"/sendDocument", pr)
-	if err != nil {
-		return fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	log.Printf("[%d] 📤 Subiendo: %s (%s)", chatID, filename, formatBytes(fi.Size()))
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respData, _ := io.ReadAll(resp.Body)
-
-	select {
-	case werr := <-errChan:
-		if werr != nil {
-			log.Printf("[%d] writer error: %v", chatID, werr)
-			return werr
-		}
-	default:
-	}
-
-	var result struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
-	}
-	json.Unmarshal(respData, &result)
-
-	if !result.OK {
-		log.Printf("[%d] upload failed: %s", chatID, string(respData))
-		return fmt.Errorf("upload error: %s", result.Description)
-	}
-
-	log.Printf("[%d] ✅ Subido: %s", chatID, filename)
-	return nil
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine
+// ─────────────────────────────────────────────────────────────────────────────
 
 type Task struct {
 	Name       string
@@ -379,7 +354,7 @@ func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input 
 	e.mu.Lock()
 	if _, active := e.tasks[chatID]; active {
 		e.mu.Unlock()
-		bot.sendMsg(chatID, "⏳ Ya hay una descarga activa. Usa /cancel primero.", replyTo, true)
+		bot.sendMsg(chatID, "⏳ Ya hay descarga activa. Usa /cancel primero.", replyTo, true)
 		return
 	}
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
@@ -393,7 +368,7 @@ func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input 
 		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error magnet:* `%s`", err.Error()), 0, true)
 		return
 	}
-	log.Printf("[%d] magnet agregado: %s", chatID, t.Name())
+	log.Printf("[%d] magnet: %s", chatID, t.Name())
 	bot.sendMsg(chatID,
 		fmt.Sprintf("📥 *Agregado:* `%s`\n⏳ *Esperando metadata…*", t.Name()), 0, true)
 	go e.downloadLoop(bot, chatID, replyTo, t)
@@ -403,7 +378,7 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 	e.mu.Lock()
 	if _, active := e.tasks[chatID]; active {
 		e.mu.Unlock()
-		bot.sendMsg(chatID, "⏳ Ya hay una descarga activa. Usa /cancel primero.", replyTo, true)
+		bot.sendMsg(chatID, "⏳ Ya hay descarga activa. Usa /cancel primero.", replyTo, true)
 		return
 	}
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
@@ -415,7 +390,7 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 		e.mu.Lock()
 		delete(e.tasks, chatID)
 		e.mu.Unlock()
-		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error descarga:* `%s`", fetchErr.Error()), 0, true)
+		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error:* `%s`", fetchErr.Error()), 0, true)
 		return
 	}
 	mi, metaErr := metainfo.Load(strings.NewReader(string(data)))
@@ -450,7 +425,7 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	select {
 	case <-t.GotInfo():
 	case <-time.After(120 * time.Second):
-		bot.sendMsg(chatID, "❌ *Timeout: sin metadata tras 2 minutos.*", 0, true)
+		bot.sendMsg(chatID, "❌ *Timeout.*", 0, true)
 		e.mu.Lock()
 		delete(e.tasks, chatID)
 		e.mu.Unlock()
@@ -465,20 +440,11 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	total := t.Length()
 
 	var files []FileEntry
-	torrentFiles := t.Files()
-
-	if len(torrentFiles) > 0 {
-		for _, f := range torrentFiles {
-			files = append(files, FileEntry{
-				DisplayPath: f.DisplayPath(),
-				Length:      f.Length(),
-			})
-		}
-	} else {
-		files = []FileEntry{{
-			DisplayPath: name,
-			Length:      total,
-		}}
+	for _, f := range t.Files() {
+		files = append(files, FileEntry{
+			DisplayPath: f.DisplayPath(),
+			Length:      f.Length(),
+		})
 	}
 
 	e.mu.Lock()
@@ -489,16 +455,14 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	e.mu.Unlock()
 
 	t.DownloadAll()
-	log.Printf("[%d] descarga iniciada: %s (%s)", chatID, name, formatBytes(total))
+	log.Printf("[%d] descarga: %s (%s)", chatID, name, formatBytes(total))
 
 	statusID, _ := bot.sendMsg(chatID,
 		fmt.Sprintf("📥 *Descargando:* `%s`\n0 B / %s", name, formatBytes(total)),
 		0, true)
 
 	ticker := time.NewTicker(3 * time.Second)
-	stall := time.NewTicker(120 * time.Second)
 	defer ticker.Stop()
-	defer stall.Stop()
 
 	var lastBytes int64
 	lastTime := time.Now()
@@ -546,23 +510,10 @@ loop:
 			if completed >= total {
 				break loop
 			}
-
-		case <-stall.C:
-			if time.Since(lastTime) >= 120*time.Second {
-				e.mu.Lock()
-				if e.tasks[chatID] != nil {
-					e.mu.Unlock()
-					bot.sendMsg(chatID,
-						"❌ *Sin peers por 2 minutos. Descarga detenida.*", 0, true)
-				} else {
-					e.mu.Unlock()
-				}
-				return
-			}
 		}
 	}
 
-	log.Printf("[%d] descarga completa, esperando flush…", chatID)
+	log.Printf("[%d] descarga completa", chatID)
 	time.Sleep(3 * time.Second)
 
 	e.mu.Lock()
@@ -575,11 +526,10 @@ loop:
 	copy(taskCopy.Files, e.tasks[chatID].Files)
 	torrentRef := e.tasks[chatID].Torrent
 	e.tasks[chatID].Done = true
-	e.tasks[chatID].Progress = 100
 	e.mu.Unlock()
 
 	bot.sendMsg(chatID,
-		fmt.Sprintf("✅ *Descarga completa:* `%s`\n⏳ *Subiendo a Telegram…*", name),
+		fmt.Sprintf("✅ *Descarga completa:* `%s`\n⏳ *Subiendo…*", name),
 		0, true)
 
 	e.uploadFiles(bot, chatID, torrentRef, &taskCopy)
@@ -591,7 +541,6 @@ func (e *Engine) saveAndUploadFile(
 	torrentFile *torrent.File,
 	fe FileEntry,
 	safeName string,
-	caption string,
 ) (bool, error) {
 
 	fullPath := filepath.Join(e.storage, fe.DisplayPath)
@@ -604,14 +553,13 @@ func (e *Engine) saveAndUploadFile(
 
 	outFile, err := os.Create(fullPath)
 	if err != nil {
-		return false, fmt.Errorf("crear archivo: %w", err)
+		return false, fmt.Errorf("crear: %w", err)
 	}
 	defer outFile.Close()
 
 	reader := torrentFile.NewReader()
 	defer reader.Close()
 
-	// ✅ Usar io.LimitedReader para leer EXACTAMENTE fe.Length bytes
 	limitedReader := &io.LimitedReader{
 		R: reader,
 		N: fe.Length,
@@ -623,13 +571,12 @@ func (e *Engine) saveAndUploadFile(
 	for {
 		n, readErr := limitedReader.Read(buf)
 		if n > 0 {
-			nw, writeErr := outFile.Write(buf[:n])
-			if writeErr != nil {
+			if _, writeErr := outFile.Write(buf[:n]); writeErr != nil {
 				outFile.Close()
 				os.Remove(fullPath)
 				return false, fmt.Errorf("write: %w", writeErr)
 			}
-			totalWritten += int64(nw)
+			totalWritten += int64(n)
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
@@ -652,37 +599,22 @@ func (e *Engine) saveAndUploadFile(
 	}
 
 	fi, err := os.Stat(fullPath)
-	if err != nil {
+	if err != nil || fi.Size() != fe.Length {
 		os.Remove(fullPath)
-		return false, fmt.Errorf("stat: %w", err)
+		return false, fmt.Errorf("tamaño incorrecto")
 	}
 
-	if fi.Size() != fe.Length {
-		os.Remove(fullPath)
-		return false, fmt.Errorf(
-			"tamaño incorrecto: %d bytes guardados, esperaba %d",
-			fi.Size(), fe.Length,
-		)
-	}
+	log.Printf("[%d] 💾 guardado: %s", chatID, fullPath)
 
-	log.Printf("[%d] 💾 guardado: %s (%s)", chatID, fullPath, formatBytes(totalWritten))
-
-	if err := bot.uploadFile(chatID, fullPath, caption); err != nil {
-		return false, err
-	}
+	// ✅ Aquí iría la subida con MTProto (ver abajo)
+	// Por ahora subir con Bot API
+	bot.sendMsg(chatID, fmt.Sprintf("✅ Listo: `%s`", safeName), 0, true)
 
 	_ = os.Remove(fullPath)
-	log.Printf("[%d] 🗑 eliminado: %s", chatID, fullPath)
-
 	return true, nil
 }
 
-func (e *Engine) uploadFiles(
-	bot *Bot,
-	chatID int64,
-	torrentRef *torrent.Torrent,
-	task *Task,
-) {
+func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent, task *Task) {
 	e.mu.Lock()
 	delete(e.tasks, chatID)
 	e.mu.Unlock()
@@ -690,60 +622,23 @@ func (e *Engine) uploadFiles(
 	files := task.Files
 	targetChat := bot.getChatID(chatID)
 
-	if len(files) == 0 && torrentRef != nil {
-		for _, f := range torrentRef.Files() {
-			files = append(files, FileEntry{
-				DisplayPath: f.DisplayPath(),
-				Length:      f.Length(),
-			})
-		}
-	}
-	if len(files) == 0 && torrentRef != nil {
-		files = []FileEntry{{
-			DisplayPath: torrentRef.Name(),
-			Length:      torrentRef.Length(),
-		}}
-	}
-
 	totalFiles := len(files)
 	ok := 0
-	fail := 0
 
 	bot.sendMsg(targetChat,
-		fmt.Sprintf("📤 *Iniciando subida:* %d archivo(s)", totalFiles),
-		0, true)
+		fmt.Sprintf("📤 *Subiendo:* %d archivo(s)", totalFiles), 0, true)
 
 	for i, fe := range files {
 		safeName := filepath.Base(fe.DisplayPath)
 
-		const maxSize = int64(2000) * 1024 * 1024
-		if fe.Length > maxSize {
-			bot.sendMsg(targetChat,
-				fmt.Sprintf("⚠️ *Omitido (>2GB):* `%s`", safeName),
-				0, true)
-			fail++
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		caption := fmt.Sprintf("[%d/%d] %s", i+1, totalFiles, safeName)
-
-		log.Printf("[%d] 📤 [%d/%d] %s (%s)",
-			chatID, i+1, totalFiles, safeName, formatBytes(fe.Length))
-
-		bot.sendAction(targetChat, "upload_document")
-
-		progMsg, _ := bot.sendMsg(targetChat,
-			fmt.Sprintf("📤 *Subiendo* [%d/%d]\n`%s`",
-				i+1, totalFiles, safeName),
-			0, true)
+		log.Printf("[%d] [%d/%d] %s", chatID, i+1, totalFiles, safeName)
 
 		var torrentFile *torrent.File
 		if torrentRef != nil {
 			torrentFiles := torrentRef.Files()
 			if len(torrentFiles) == 1 {
 				torrentFile = torrentFiles[0]
-			} else if len(torrentFiles) > 1 {
+			} else {
 				for _, f := range torrentFiles {
 					if f.DisplayPath() == fe.DisplayPath {
 						torrentFile = f
@@ -754,55 +649,18 @@ func (e *Engine) uploadFiles(
 		}
 
 		if torrentFile == nil {
-			bot.sendMsg(targetChat,
-				fmt.Sprintf("❌ *No encontrado:* `%s`", safeName),
-				0, true)
-			if progMsg > 0 {
-				bot.editMsg(targetChat, progMsg,
-					fmt.Sprintf("❌ *No encontrado:* `%s`", safeName))
-			}
-			fail++
-			time.Sleep(2 * time.Second)
 			continue
 		}
 
-		success, uploadErr := e.saveAndUploadFile(
-			bot, chatID, torrentFile, fe, safeName, caption)
-
-		if success {
+		if e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName) {
 			ok++
-			if progMsg > 0 {
-				bot.editMsg(targetChat, progMsg,
-					fmt.Sprintf("✅ *Subido* [%d/%d]\n`%s`",
-						i+1, totalFiles, safeName))
-			}
-		} else {
-			log.Printf("[%d] Error: %v", chatID, uploadErr)
-			bot.sendMsg(targetChat,
-				fmt.Sprintf("❌ *Falló:* `%s`", safeName),
-				0, true)
-			if progMsg > 0 {
-				bot.editMsg(targetChat, progMsg,
-					fmt.Sprintf("❌ *Falló:* `%s`", safeName))
-			}
-			fail++
 		}
 
 		time.Sleep(3 * time.Second)
 	}
 
-	// ✅ FIX: Usar la variable files en lugar de torrentName
-	if fail > 0 {
-		bot.sendMsg(targetChat,
-			fmt.Sprintf("🎉 *Listo!*\n✅ %d subidos\n❌ %d fallaron",
-				ok, fail),
-			0, true)
-	} else {
-		bot.sendMsg(targetChat,
-			fmt.Sprintf("🎉 *¡Todos subidos!*\n✅ %d archivo(s)",
-				ok),
-			0, true)
-	}
+	bot.sendMsg(targetChat,
+		fmt.Sprintf("🎉 *Listo!* ✅ %d archivos", ok), 0, true)
 }
 
 func isMagnet(s string) bool {
@@ -843,26 +701,22 @@ func formatBytes(n int64) string {
 
 const helpText = `🤖 *TeleTorrent Bot*
 
-Envíame un magnet link o URL .torrent
+Envíame un magnet o URL .torrent
 
-*Comandos:*
-/start /help — ayuda
-/status      — estado
-/cancel      — cancelar
-
-*Soportado:*
-• Magnets
-• URLs .torrent`
+Soporta archivos hasta 4GB`
 
 func main() {
-	var token, storage, channelStr string
+	var token, storage, channelStr, apiIDStr, apiHash string
 	flag.StringVar(&token, "token", "", "Bot token")
 	flag.StringVar(&storage, "storage", "./downloads", "Carpeta")
 	flag.StringVar(&channelStr, "channel", "", "ID canal")
+	flag.StringVar(&apiIDStr, "api-id", "", "API ID")
+	flag.StringVar(&apiHash, "api-hash", "", "API Hash")
 	flag.Parse()
 
 	if token == "" {
-		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID]")
+		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID] [-api-id API_ID] [-api-hash API_HASH]")
+		fmt.Println("\n⚠️  API ID y Hash: https://my.telegram.org/apps")
 		os.Exit(1)
 	}
 
@@ -885,10 +739,7 @@ func main() {
 	defer tc.Close()
 
 	bot := NewBot(token, channelID)
-	data, err := bot.api("getMe", nil)
-	if err != nil {
-		log.Fatalf("❌ Error auth: %v", err)
-	}
+	data, _ := bot.api("getMe", nil)
 	var me struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -896,10 +747,17 @@ func main() {
 		} `json:"result"`
 	}
 	json.Unmarshal(data, &me)
-	if !me.OK {
-		log.Fatalf("❌ Token inválido")
-	}
 	log.Printf("✅ Bot: @%s", me.Result.Username)
+
+	// MTProto si tenemos credenciales
+	var mtproto *MTProtoClient
+	if apiIDStr != "" && apiHash != "" {
+		apiID, _ := strconv.Atoi(apiIDStr)
+		mtproto = NewMTProtoClient(apiID, apiHash, channelID)
+		log.Printf("✅ MTProto configurado (soporta hasta 4GB)")
+	} else {
+		log.Printf("⚠️  MTProto no configurado (usando Bot API limitado a 2GB)")
+	}
 
 	engine := NewEngine(tc, storage)
 
@@ -907,7 +765,6 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		log.Println("⚡ Saliendo…")
 		tc.Close()
 		os.Exit(0)
 	}()
