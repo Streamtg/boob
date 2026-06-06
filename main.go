@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,9 +37,8 @@ func NewBot(token string) *Bot {
 	return &Bot{
 		token:   token,
 		baseURL: "https://api.telegram.org/bot" + token,
-		// Separate client for Telegram API — no timeout during long-poll
 		client: &http.Client{
-			Timeout: 0, // No timeout — let long-polling work
+			Timeout: 0,
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 100,
@@ -96,31 +98,6 @@ type Update struct {
 	} `json:"callback_query"`
 }
 
-type multipartWriter struct {
-	buf []byte
-}
-
-func (m *multipartWriter) addField(k, v string) {
-	m.buf = append(m.buf,
-		[]byte(fmt.Sprintf("--BOUNDARY\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n", k, v))...)
-}
-
-func (m *multipartWriter) addFile(field, filename string, r io.Reader) {
-	m.buf = append(m.buf,
-		[]byte(fmt.Sprintf(
-			"--BOUNDARY\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\n\r\n",
-			field, filename))...)
-	data, _ := io.ReadAll(r)
-	m.buf = append(m.buf, data...)
-	m.buf = append(m.buf, "\r\n"...)
-}
-
-func (m *multipartWriter) finish() (io.ReadCloser, string) {
-	m.buf = append(m.buf, "--BOUNDARY--\r\n"...)
-	return io.NopCloser(strings.NewReader(string(m.buf))),
-		"multipart/form-data; boundary=BOUNDARY"
-}
-
 func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (int, error) {
 	var parseMode string
 	if markdown {
@@ -145,8 +122,7 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 	}
 	json.Unmarshal(data, &r)
 	if !r.OK {
-		errMsg := string(data)
-		log.Printf("[%d] sendMsg API error: %s", chatID, errMsg)
+		log.Printf("[%d] sendMsg API error: %s", chatID, string(data))
 		return 0, fmt.Errorf("api error")
 	}
 	return r.Result.MessageID, nil
@@ -175,37 +151,101 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-func (b *Bot) uploadFile(chatID int64, filepath string, replyTo int) error {
-	file, err := os.Open(filepath)
+// uploadFile sends a file to Telegram using multipart/form-data.
+// It properly formats the multipart body and checks the API response.
+func (b *Bot) uploadFile(chatID int64, filePath string, replyTo int, caption string) error {
+	file, err := os.Open(filePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("open file: %w", err)
 	}
 	defer file.Close()
 
-	fi, err := file.Stat()
+	data, err := io.ReadAll(file)
 	if err != nil {
-		return err
+		return fmt.Errorf("read file: %w", err)
 	}
 
-	mp := multipartWriter{}
-	mp.addField("chat_id", strconv.FormatInt(chatID, 10))
+	filename := filepath.Base(filePath)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	// Add chat_id field
+	writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+
+	// Add reply_to_message_id if provided
 	if replyTo > 0 {
-		mp.addField("reply_to_message_id", strconv.Itoa(replyTo))
+		writer.WriteField("reply_to_message_id", strconv.Itoa(replyTo))
 	}
-	mp.addFile("document", fi.Name(), file)
-	reader, ctype := mp.finish()
 
-	req, err := http.NewRequest("POST", b.baseURL+"/sendDocument", reader)
-	if err != nil {
-		return err
+	// Add caption
+	if caption != "" {
+		writer.WriteField("caption", caption)
 	}
-	req.Header.Set("Content-Type", ctype)
+
+	// Add document field
+	part, err := writer.CreateFormFile("document", filename)
+	if err != nil {
+		return fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return fmt.Errorf("write data: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close writer: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", b.baseURL+"/sendDocument", &body)
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	log.Printf("[%d] Uploading file: %s (%s)", chatID, filename, formatBytes(int64(len(data))))
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("do request: %w", err)
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+
+	respData, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+	}
+	json.Unmarshal(respData, &result)
+
+	if !result.OK {
+		log.Printf("[%d] upload failed: %s", chatID, string(respData))
+		return fmt.Errorf("upload error: %s", result.Description)
+	}
+
+	log.Printf("[%d] ✅ uploaded: %s", chatID, filename)
+	return nil
+}
+
+// uploadFileByURL sends a file by URL (Telegram can fetch it)
+func (b *Bot) uploadFileByURL(chatID int64, fileURL string, replyTo int, caption string) error {
+	body, _ := json.Marshal(map[string]interface{}{
+		"chat_id":             chatID,
+		"document":            fileURL,
+		"reply_to_message_id": replyTo,
+		"caption":             caption,
+	})
+	data, err := b.post("sendDocument", "application/json", strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("sendDocument: %w", err)
+	}
+	var r struct {
+		OK bool `json:"ok"`
+	}
+	json.Unmarshal(data, &r)
+	if !r.OK {
+		return fmt.Errorf("API error: %s", string(data))
+	}
 	return nil
 }
 
@@ -307,11 +347,6 @@ func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input 
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
 	e.mu.Unlock()
 
-	_, err := bot.sendMsg(chatID, "⏳ *Starting download…*", replyTo, true)
-	if err != nil {
-		log.Printf("[%d] failed to send start message: %v", chatID, err)
-	}
-
 	clean := strings.TrimSpace(input)
 	t, err := e.tc.AddMagnet(clean)
 	if err != nil {
@@ -342,7 +377,7 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 		bot.sendMsg(chatID, fmt.Sprintf("❌ *Fetch failed:* `%s`", fe.Error()), 0, true)
 		return
 	}
-	mi, metaErr := metainfo.Load(strings.NewReader(string(data)))
+	mi, metaErr := metainfo.Load(bytes.NewReader(data))
 	if metaErr != nil {
 		e.fail(chatID, fmt.Sprintf("torrent parse error: %v", metaErr))
 		bot.sendMsg(chatID, fmt.Sprintf("❌ *Parse error:* `%s`", metaErr.Error()), 0, true)
@@ -367,10 +402,8 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		}
 	}()
 
-	// Wait for metadata
 	select {
 	case <-t.GotInfo():
-		// Metadata received
 	case <-time.After(120 * time.Second):
 		bot.sendMsg(chatID, "❌ *Timeout: no metadata after 2 minutes.*", 0, true)
 		e.mu.Lock()
@@ -401,7 +434,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	task.TotalBytes = total
 	task.mu.Unlock()
 
-	// Start downloading
 	t.DownloadAll()
 	log.Printf("[%d] download started: %s (%s)", chatID, name, formatBytes(total))
 
@@ -474,37 +506,91 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	task.mu.Unlock()
 
 	bot.sendMsg(chatID, fmt.Sprintf("✅ *Download complete:* `%s`\n⏳ *Uploading to Telegram…*", name), 0, true)
-	e.uploadFiles(bot, chatID, replyTo, t)
+
+	// Upload files to Telegram
+	e.uploadFiles(bot, chatID, t)
 }
 
-func (e *Engine) uploadFiles(bot *Bot, chatID int64, replyTo int, t *torrent.Torrent) {
+func (e *Engine) uploadFiles(bot *Bot, chatID int64, t *torrent.Torrent) {
 	e.mu.RLock()
 	task := e.tasks[chatID]
 	e.mu.RUnlock()
 
 	task.mu.RLock()
 	files := task.Files
-	task.mu.RUnlock()
+	torrentName := task.Name
+	e.mu.RUnlock()
 
 	ok, fail := 0, 0
-	for _, fPath := range files {
+	totalFiles := len(files)
+
+	bot.sendMsg(chatID,
+		fmt.Sprintf("📤 *Starting upload:* %d file(s)", totalFiles), 0, true)
+
+	for i, fPath := range files {
+		// Sanitize path for storage directory
+		safeName := filepath.Base(fPath)
 		full := e.storage + "/" + fPath
+
 		fi, err := os.Stat(full)
-		if err != nil || fi.IsDir() || fi.Size() == 0 {
+		if err != nil {
+			log.Printf("[%d] file not found: %s", chatID, full)
+			bot.sendMsg(chatID, fmt.Sprintf("⚠️ File not found: `%s`", safeName), 0, true)
+			fail++
+			continue
+		}
+		if fi.IsDir() {
+			continue
+		}
+		if fi.Size() == 0 {
+			log.Printf("[%d] skipping empty file: %s", chatID, full)
 			continue
 		}
 
-		log.Printf("[%d] uploading %s (%s)", chatID, fPath, formatBytes(fi.Size()))
+		// Limit file size to 2000MB for Telegram
+		maxSize := int64(2000) * 1024 * 1024
+		if fi.Size() > maxSize {
+			log.Printf("[%d] file too large (%s > 2GB): %s", chatID, formatBytes(fi.Size()), safeName)
+			bot.sendMsg(chatID,
+				fmt.Sprintf("⚠️ *File too large:* `%s` (%s)\nTelegram limit is 2GB per file.",
+					safeName, formatBytes(fi.Size())), 0, true)
+			fail++
+			continue
+		}
+
+		caption := fmt.Sprintf("[%d/%d] %s — %s", i+1, totalFiles, torrentName, safeName)
+
+		log.Printf("[%d] 📤 uploading [%d/%d]: %s (%s)",
+			chatID, i+1, totalFiles, safeName, formatBytes(fi.Size()))
+
 		bot.sendAction(chatID, "upload_document")
 
-		if err := bot.uploadFile(chatID, full, replyTo); err != nil {
-			log.Printf("[%d] upload failed %s: %v", chatID, fPath, err)
-			bot.sendMsg(chatID, fmt.Sprintf("⚠️ Upload failed: %s — %v", fPath, err), 0, false)
+		// Send a progress message
+		progMsg, _ := bot.sendMsg(chatID,
+			fmt.Sprintf("📤 *Uploading:* `%s` (%d/%d)\n📊 %s / %s",
+				safeName, i+1, totalFiles, formatBytes(fi.Size()), formatBytes(fi.Size())),
+			0, true)
+
+		// Upload the file
+		err = bot.uploadFile(chatID, full, 0, caption)
+		if err != nil {
+			log.Printf("[%d] upload failed %s: %v", chatID, safeName, err)
+			bot.sendMsg(chatID,
+				fmt.Sprintf("❌ *Upload failed:* `%s` — %v", safeName, err), 0, true)
 			fail++
 		} else {
 			ok++
+			bot.sendMsg(chatID,
+				fmt.Sprintf("✅ *Uploaded:* `%s` (%d/%d)", safeName, i+1, totalFiles), 0, true)
 		}
-		time.Sleep(500 * time.Millisecond)
+
+		// Update progress message
+		if progMsg > 0 {
+			bot.editMsg(chatID, progMsg,
+				fmt.Sprintf("✅ *Done:* `%s`", safeName))
+		}
+
+		time.Sleep(1 * time.Second)
 	}
 
 	e.mu.Lock()
@@ -512,9 +598,11 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, replyTo int, t *torrent.Tor
 	e.mu.Unlock()
 
 	if fail > 0 {
-		bot.sendMsg(chatID, fmt.Sprintf("🎉 *Done!* %d uploaded, %d failed.", ok, fail), 0, true)
+		bot.sendMsg(chatID,
+			fmt.Sprintf("🎉 *Done!* %d file(s) uploaded, %d failed.", ok, fail), 0, true)
 	} else {
-		bot.sendMsg(chatID, fmt.Sprintf("🎉 *All done!* %d file(s) uploaded.", ok), 0, true)
+		bot.sendMsg(chatID,
+			fmt.Sprintf("🎉 *All done!* %d file(s) uploaded successfully.", ok), 0, true)
 	}
 }
 
@@ -543,7 +631,7 @@ func isTorrentURL(s string) bool {
 }
 
 func fetchURL(raw string) ([]byte, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Get(raw)
 	if err != nil {
 		return nil, err
@@ -672,14 +760,6 @@ func main() {
 			offset = u.UpdateID + 1
 
 			if u.Message != nil && u.Message.Text != "" {
-				chatID := u.Message.Chat.ID
-				text := u.Message.Text
-				if text == "" {
-					text = u.Message.Caption
-				}
-				replyTo := u.Message.MessageID
-				go engine.Handle(bot, chatID, replyTo, text)
-			} else if u.Message != nil && (u.Message.Text != "" || u.Message.Caption != "") {
 				chatID := u.Message.Chat.ID
 				text := u.Message.Text
 				if text == "" {
