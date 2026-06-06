@@ -589,7 +589,6 @@ func (e *Engine) saveAndUploadFile(
 		N: fe.Length,
 	}
 
-	// ✅ FIX: No usar err aquí
 	_, copyErr := io.CopyBuffer(outFile, limitedReader, make([]byte, 4*1024*1024))
 	if copyErr != nil && copyErr != io.EOF {
 		outFile.Close()
@@ -615,10 +614,10 @@ func (e *Engine) saveAndUploadFile(
 
 	log.Printf("[%d] 💾 guardado: %s (%s)", chatID, fullPath, formatBytes(fi.Size()))
 
-	uploadErr := bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
-	if uploadErr != nil {
-		log.Printf("[%d] upload error: %v", chatID, uploadErr)
-		return false, uploadErr
+	// ✅ FIX: Usar directamente el error
+	if err := bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName)); err != nil {
+		log.Printf("[%d] upload error: %v", chatID, err)
+		return false, err
 	}
 
 	_ = os.Remove(fullPath)
@@ -668,13 +667,15 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 			continue
 		}
 
-		success, uploadErr := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName)
+		// ✅ FIX: Capturar correctamente
+		success, err := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName)
 		if success {
 			ok++
 			bot.sendMsg(targetChat,
 				fmt.Sprintf("✅ *Subido:* `%s`", safeName), 0, true)
 		} else {
 			fail++
+			log.Printf("[%d] Error: %v", chatID, err)
 			bot.sendMsg(targetChat,
 				fmt.Sprintf("❌ *Falló:* `%s`", safeName), 0, true)
 		}
