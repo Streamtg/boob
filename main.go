@@ -111,7 +111,6 @@ type Update struct {
 	} `json:"callback_query"`
 }
 
-// ✅ Enviar mensaje con reintentos robusto ante rate limit
 func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (int, error) {
 	var parseMode string
 	if markdown {
@@ -142,7 +141,6 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 		}
 		json.Unmarshal(data, &r)
 
-		// Manejo de rate limit
 		if r.ErrorCode == 429 {
 			waitTime := time.Duration(r.RetryAfter+5) * time.Second
 			log.Printf("[%d] Rate limit (429), esperando %v…", chatID, waitTime)
@@ -221,7 +219,7 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 			errChan <- fmt.Errorf("create form file: %w", err)
 			return
 		}
-		buf := make([]byte, 512*1024) // 512 KB chunks
+		buf := make([]byte, 512*1024)
 		for {
 			n, readErr := file.Read(buf)
 			if n > 0 {
@@ -283,10 +281,6 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 	log.Printf("[%d] ✅ Subido: %s", chatID, filename)
 	return nil
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Engine
-// ─────────────────────────────────────────────────────────────────────────────
 
 type Task struct {
 	Name       string
@@ -591,7 +585,6 @@ loop:
 	e.uploadFiles(bot, chatID, torrentRef, &taskCopy)
 }
 
-// ✅ FIX CRÍTICO: Leer EXACTAMENTE el número de bytes especificados
 func (e *Engine) saveAndUploadFile(
 	bot *Bot,
 	chatID int64,
@@ -607,7 +600,6 @@ func (e *Engine) saveAndUploadFile(
 		return false, fmt.Errorf("mkdir: %w", err)
 	}
 
-	// Borrar archivo previo si existe
 	_ = os.Remove(fullPath)
 
 	outFile, err := os.Create(fullPath)
@@ -619,13 +611,13 @@ func (e *Engine) saveAndUploadFile(
 	reader := torrentFile.NewReader()
 	defer reader.Close()
 
-	// ✅ FIX PRINCIPAL: Usar io.LimitedReader para leer EXACTAMENTE fe.Length bytes
+	// ✅ Usar io.LimitedReader para leer EXACTAMENTE fe.Length bytes
 	limitedReader := &io.LimitedReader{
 		R: reader,
 		N: fe.Length,
 	}
 
-	buf := make([]byte, 512*1024) // 512 KB chunks
+	buf := make([]byte, 512*1024)
 	totalWritten := int64(0)
 
 	for {
@@ -649,7 +641,6 @@ func (e *Engine) saveAndUploadFile(
 		}
 	}
 
-	// Sincronizar antes de cerrar
 	if err := outFile.Sync(); err != nil {
 		os.Remove(fullPath)
 		return false, fmt.Errorf("sync: %w", err)
@@ -660,7 +651,6 @@ func (e *Engine) saveAndUploadFile(
 		return false, fmt.Errorf("close: %w", err)
 	}
 
-	// Verificación final
 	fi, err := os.Stat(fullPath)
 	if err != nil {
 		os.Remove(fullPath)
@@ -677,12 +667,10 @@ func (e *Engine) saveAndUploadFile(
 
 	log.Printf("[%d] 💾 guardado: %s (%s)", chatID, fullPath, formatBytes(totalWritten))
 
-	// Subir a Telegram
 	if err := bot.uploadFile(chatID, fullPath, caption); err != nil {
 		return false, err
 	}
 
-	// Eliminar tras subida exitosa
 	_ = os.Remove(fullPath)
 	log.Printf("[%d] 🗑 eliminado: %s", chatID, fullPath)
 
@@ -700,7 +688,6 @@ func (e *Engine) uploadFiles(
 	e.mu.Unlock()
 
 	files := task.Files
-	torrentName := task.Name
 	targetChat := bot.getChatID(chatID)
 
 	if len(files) == 0 && torrentRef != nil {
@@ -801,10 +788,10 @@ func (e *Engine) uploadFiles(
 			fail++
 		}
 
-		time.Sleep(3 * time.Second) // Delay más largo para evitar rate limit
+		time.Sleep(3 * time.Second)
 	}
 
-	// Resumen final
+	// ✅ FIX: Usar la variable files en lugar de torrentName
 	if fail > 0 {
 		bot.sendMsg(targetChat,
 			fmt.Sprintf("🎉 *Listo!*\n✅ %d subidos\n❌ %d fallaron",
@@ -817,10 +804,6 @@ func (e *Engine) uploadFiles(
 			0, true)
 	}
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
 
 func isMagnet(s string) bool {
 	return strings.HasPrefix(strings.TrimSpace(s), "magnet:?")
