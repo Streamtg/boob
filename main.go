@@ -37,13 +37,26 @@ func NewBot(token string) *Bot {
 	return &Bot{
 		token:   token,
 		baseURL: "https://api.telegram.org/bot" + token,
+		// Separate HTTP client for long-polling (no timeout)
 		client: &http.Client{
 			Timeout: 0,
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 100,
+				MaxIdleConns:        5,
+				MaxIdleConnsPerHost: 5,
 				IdleConnTimeout:     90 * time.Second,
 			},
+		},
+	}
+}
+
+// uploadClient returns a fresh HTTP client for file uploads (not shared with polling)
+func uploadClient() *http.Client {
+	return &http.Client{
+		Timeout: 5 * time.Minute, // 5 min per file upload
+		Transport: &http.Transport{
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     60 * time.Second,
 		},
 	}
 }
@@ -151,63 +164,7 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-// uploadFileFromReader reads data from an io.Reader and uploads to Telegram
-func (b *Bot) uploadFileFromReader(chatID int64, filename string, size int64, data io.Reader, caption string) error {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
-	if caption != "" {
-		writer.WriteField("caption", caption)
-	}
-
-	part, err := writer.CreateFormFile("document", filename)
-	if err != nil {
-		return fmt.Errorf("create form file: %w", err)
-	}
-	// Copy data to the multipart writer
-	written, err := io.Copy(part, data)
-	if err != nil {
-		return fmt.Errorf("copy data: %w", err)
-	}
-	log.Printf("[%d] wrote %d bytes to multipart", chatID, written)
-
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("close writer: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", b.baseURL+"/sendDocument", &body)
-	if err != nil {
-		return fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	log.Printf("[%d] Uploading file: %s (%s)", chatID, filename, formatBytes(size))
-
-	resp, err := b.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respData, _ := io.ReadAll(resp.Body)
-
-	var result struct {
-		OK          bool   `json:"ok"`
-		Description string `json:"description"`
-	}
-	json.Unmarshal(respData, &result)
-
-	if !result.OK {
-		log.Printf("[%d] upload failed: %s", chatID, string(respData))
-		return fmt.Errorf("upload error: %s", result.Description)
-	}
-
-	log.Printf("[%d] ✅ uploaded: %s", chatID, filename)
-	return nil
-}
-
-// uploadFile reads a local file and uploads to Telegram
+// uploadFile uploads a local file to Telegram using a dedicated client
 func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -221,6 +178,8 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 	}
 
 	filename := filepath.Base(filePath)
+	client := uploadClient()
+	defer client.CloseIdleConnections()
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -248,9 +207,9 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
-	log.Printf("[%d] Uploading file: %s (%s)", chatID, filename, formatBytes(fi.Size()))
+	log.Printf("[%d] 📤 Uploading: %s (%s)", chatID, filename, formatBytes(fi.Size()))
 
-	resp, err := b.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("do request: %w", err)
 	}
@@ -269,12 +228,12 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 		return fmt.Errorf("upload error: %s", result.Description)
 	}
 
-	log.Printf("[%d] ✅ uploaded: %s", chatID, filename)
+	log.Printf("[%d] ✅ Uploaded: %s", chatID, filename)
 	return nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Download engine — ALL mutex operations use e.mu only
+// Download engine
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Task struct {
@@ -288,7 +247,7 @@ type Task struct {
 }
 
 type FileEntry struct {
-	DisplayPath string // original path from torrent
+	DisplayPath string
 	Length      int64
 }
 
@@ -434,7 +393,7 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.Torrent) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[%d] panic in downloadLoop: %v", chatID, r)
+			log.Printf("[%d] panic recovered in downloadLoop: %v", chatID, r)
 		}
 	}()
 
@@ -541,25 +500,22 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		}
 	}
 
+	// Download complete — copy task data before releasing the lock
 	e.mu.Lock()
-	if e.tasks[chatID] != nil {
-		e.tasks[chatID].Done = true
-		e.tasks[chatID].Progress = 100
-	}
+	taskCopy := *e.tasks[chatID]
+	taskCopy.Files = make([]FileEntry, len(e.tasks[chatID].Files))
+	copy(taskCopy.Files, e.tasks[chatID].Files)
+	e.tasks[chatID].Done = true
+	e.tasks[chatID].Progress = 100
 	e.mu.Unlock()
 
 	bot.sendMsg(chatID, fmt.Sprintf("✅ *Download complete:* `%s`\n⏳ *Uploading to Telegram…*", name), 0, true)
 
-	e.mu.Lock()
-	task := e.tasks[chatID]
-	e.mu.Unlock()
-
-	if task != nil {
-		e.uploadFiles(bot, chatID, t, task)
-	}
+	// Upload files — this runs AFTER download loop exits and torrent may still be alive
+	e.uploadFiles(bot, chatID, &taskCopy)
 }
 
-func (e *Engine) uploadFiles(bot *Bot, chatID int64, t *torrent.Torrent, task *Task) {
+func (e *Engine) uploadFiles(bot *Bot, chatID int64, task *Task) {
 	files := task.Files
 	torrentName := task.Name
 
@@ -576,7 +532,6 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, t *torrent.Torrent, task *T
 	for i, fe := range files {
 		safeName := filepath.Base(fe.DisplayPath)
 
-		// Limit file size to 2000MB for Telegram
 		maxSize := int64(2000) * 1024 * 1024
 		if fe.Length > maxSize {
 			log.Printf("[%d] file too large (%s > 2GB): %s", chatID, formatBytes(fe.Length), safeName)
@@ -599,8 +554,38 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, t *torrent.Torrent, task *T
 				safeName, i+1, totalFiles, formatBytes(fe.Length)),
 			0, true)
 
-		// Read file from torrent using NewReader
-		err := e.readAndUploadFile(bot, chatID, t, fe, safeName, caption)
+		// Try reading from filesystem
+		fullPath := filepath.Join(e.storage, fe.DisplayPath)
+		
+		// If file doesn't exist on disk, try to read from torrent reader and save it
+		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+			log.Printf("[%d] file not on disk, reading from torrent: %s", chatID, safeName)
+			var torrentFile *torrent.File
+			for _, f := range e.tc.Torrents() {
+				for _, tf := range f.Files() {
+					if tf.DisplayPath() == fe.DisplayPath {
+						torrentFile = tf
+						break
+					}
+				}
+			}
+			if torrentFile != nil {
+				reader := torrentFile.NewReader()
+				data, readErr := io.ReadAll(reader)
+				reader.Close()
+				if readErr == nil && len(data) > 0 {
+					// Save to disk
+					dir := filepath.Dir(fullPath)
+					os.MkdirAll(dir, 0755)
+					os.WriteFile(fullPath, data, 0644)
+					log.Printf("[%d] saved to disk: %s", chatID, fullPath)
+				} else if readErr != nil {
+					log.Printf("[%d] torrent read error: %v", chatID, readErr)
+				}
+			}
+		}
+
+		err := bot.uploadFile(chatID, fullPath, caption)
 
 		if err != nil {
 			log.Printf("[%d] upload failed %s: %v", chatID, safeName, err)
@@ -628,64 +613,6 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, t *torrent.Torrent, task *T
 		bot.sendMsg(chatID,
 			fmt.Sprintf("🎉 *All done!* %d file(s) uploaded successfully.", ok), 0, true)
 	}
-}
-
-// readAndUploadFile reads a file from the torrent using NewReader and uploads it.
-// Falls back to reading from the filesystem if the torrent reader fails.
-func (e *Engine) readAndUploadFile(bot *Bot, chatID int64, t *torrent.Torrent, fe FileEntry, safeName string, caption string) error {
-	// Try to find the file in the torrent
-	var torrentFile *torrent.File
-	for _, f := range t.Files() {
-		if f.DisplayPath() == fe.DisplayPath {
-			torrentFile = f
-			break
-		}
-	}
-
-	if torrentFile == nil {
-		// Fallback: try to read from filesystem
-		fullPath := filepath.Join(e.storage, fe.DisplayPath)
-		if data, err := os.ReadFile(fullPath); err == nil {
-			return bot.uploadFileFromReader(chatID, safeName, fe.Length, bytes.NewReader(data), caption)
-		}
-		return fmt.Errorf("file not found in torrent: %s", fe.DisplayPath)
-	}
-
-	// Try reading from filesystem first (faster for already-written data)
-	fullPath := filepath.Join(e.storage, fe.DisplayPath)
-	if data, err := os.ReadFile(fullPath); err == nil && len(data) > 0 {
-		log.Printf("[%d] reading from filesystem: %s", chatID, fullPath)
-		return bot.uploadFileFromReader(chatID, safeName, fe.Length, bytes.NewReader(data), caption)
-	}
-
-	// Fall back to torrent reader
-	log.Printf("[%d] reading from torrent reader: %s", chatID, safeName)
-	reader := torrentFile.NewReader()
-	defer reader.Close()
-
-	// Read all data
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return fmt.Errorf("read data: %w", err)
-	}
-
-	if len(data) == 0 {
-		return fmt.Errorf("empty file data")
-	}
-
-	// Also save to local file for future use
-	fullPath = filepath.Join(e.storage, fe.DisplayPath)
-	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		log.Printf("[%d] mkdir failed: %v", chatID, err)
-	}
-	if err := os.WriteFile(fullPath, data, 0644); err != nil {
-		log.Printf("[%d] save file failed: %v", chatID, err)
-	} else {
-		log.Printf("[%d] saved: %s", chatID, fullPath)
-	}
-
-	return bot.uploadFileFromReader(chatID, safeName, fe.Length, bytes.NewReader(data), caption)
 }
 
 func (e *Engine) fail(chatID int64, msg string) {
@@ -786,7 +713,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌  Torrent client error: %v", err)
 	}
-	defer tc.Close()
+	// Don't defer tc.Close() here — we close it on signal
 	log.Printf("✅  Torrent client ready. Storage: %s", storage)
 
 	bot := NewBot(token)
@@ -814,6 +741,7 @@ func main() {
 		os.Exit(0)
 	}()
 
+	// Main polling loop — NEVER exits while bot is running
 	offset := 0
 	for {
 		data, err := bot.api("getUpdates", map[string]string{
