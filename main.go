@@ -660,10 +660,7 @@ func (e *Engine) readAndUploadFile(bot *Bot, chatID int64, t *torrent.Torrent, f
 
 	// Fall back to torrent reader
 	log.Printf("[%d] reading from torrent reader: %s", chatID, safeName)
-	reader, err := torrentFile.NewReader()
-	if err != nil {
-		return fmt.Errorf("create reader: %w", err)
-	}
+	reader := torrentFile.NewReader()
 	defer reader.Close()
 
 	// Read all data
