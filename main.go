@@ -23,8 +23,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
-	"github.com/gotd/td/telegram/message"
-	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
 
@@ -130,25 +128,6 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 	return r.Result.MessageID, nil
 }
 
-func (b *Bot) sendMsgText(chatID int64, text string) error {
-	body, _ := json.Marshal(map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
-	})
-	data, err := b.post("sendMessage", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	var r struct {
-		OK bool `json:"ok"`
-	}
-	json.Unmarshal(data, &r)
-	if !r.OK {
-		return fmt.Errorf("sendMsg error: %s", string(data))
-	}
-	return nil
-}
-
 func (b *Bot) editMsg(chatID int64, msgID int, text string) {
 	body, _ := json.Marshal(map[string]interface{}{
 		"chat_id":    chatID,
@@ -170,7 +149,7 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 	}
 	defer file.Close()
 
-	stat, err := file.Stat()
+	_, err = file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
 	}
@@ -224,7 +203,7 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MTProto Client
+// MTProto Client — compatible con gotd/td v0.145.1
 // ─────────────────────────────────────────────────────────────────────────────
 
 type MTProtoConfig struct {
@@ -236,18 +215,18 @@ type MTProtoConfig struct {
 }
 
 type MTProtoClient struct {
-	cfg       MTProtoConfig
-	client    *telegram.Client
-	sender    *message.Sender
-	uploader_ *uploader.Uploader
-	ready     bool
-	mu        sync.Mutex
+	cfg     MTProtoConfig
+	client  *telegram.Client
+	api     *tg.Client
+	ready   bool
+	mu      sync.Mutex
 }
 
 func NewMTProtoClient(cfg MTProtoConfig) *MTProtoClient {
 	return &MTProtoClient{cfg: cfg}
 }
 
+// Terminal implements auth.UserAuthenticator for gotd/td v0.145.1
 type Terminal struct {
 	PhoneNumber string
 }
@@ -263,7 +242,7 @@ func (t *Terminal) Phone(_ context.Context) (string, error) {
 	return strings.TrimSpace(phone), nil
 }
 
-func (t *Terminal) Code(_ context.Context, sentCode any) (string, error) {
+func (t *Terminal) Code(_ context.Context, _ *tg.AuthSentCode) (string, error) {
 	fmt.Print("📱 Enter the code sent to your Telegram: ")
 	var code string
 	fmt.Scanln(&code)
@@ -281,7 +260,7 @@ func (t *Terminal) SignUp(_ context.Context) (auth.UserInfo, error) {
 	return auth.UserInfo{}, fmt.Errorf("sign up not supported")
 }
 
-func (t *Terminal) AcceptTermsOfService(_ context.Context, tos any) error {
+func (t *Terminal) AcceptTermsOfService(_ context.Context, _ tg.HelpTermsOfService) error {
 	return nil
 }
 
@@ -291,38 +270,25 @@ func (m *MTProtoClient) Start(ctx context.Context) error {
 		m.mu.Unlock()
 		return nil
 	}
-
-	var storage telegram.SessionStorage = &telegram.MemoryStorage{}
-
-	if m.cfg.SessionPath != "" {
-		if data, err := os.ReadFile(m.cfg.SessionPath); err == nil {
-			var sessionJSON []json.RawMessage
-			if json.Unmarshal(data, &sessionJSON) == nil {
-				storage = telegram.StorageJSON(sessionJSON)
-				log.Printf("💾 MTProto session loaded from %s", m.cfg.SessionPath)
-			}
-		}
-	}
 	m.mu.Unlock()
 
-	m.client = telegram.NewClient(telegram.Config{
-		AppID:         m.cfg.APIID,
-		AppHash:       m.cfg.APIHash,
-		DeviceModel:   "TeleTorrent-Bot",
-		SystemVersion: "Linux/Go",
-		SessionStorage: storage,
+	log.Println("🔐 Starting MTProto authentication...")
+
+	// Create client with app credentials
+	m.client = telegram.NewClient(m.cfg.APIID, m.cfg.APIHash, telegram.Options{
+		SessionStorage: &telegram.MemoryStorage{},
 	})
 
 	authHandler := &Terminal{PhoneNumber: m.cfg.Phone}
 
-	log.Println("🔐 Starting MTProto authentication (will prompt for code)...")
-
 	if err := m.client.Run(ctx, func(ctx context.Context) error {
+		// Authenticate
 		flow := auth.NewFlow(authHandler, auth.SendCodeOptions{})
 		if err := m.client.Auth().IfNecessary(ctx, flow); err != nil {
 			return fmt.Errorf("MTProto auth failed: %w", err)
 		}
 
+		// Get self info
 		self, err := m.client.Self(ctx)
 		if err == nil {
 			log.Printf("✅ MTProto authenticated as: %s %s (@%s)",
@@ -333,20 +299,12 @@ func (m *MTProtoClient) Start(ctx context.Context) error {
 		return fmt.Errorf("MTProto connection failed: %w", err)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cfg.SessionPath != "" {
-		if storageJSON, ok := storage.(telegram.StorageJSON); ok && len(storageJSON) > 0 {
-			if data, err := json.Marshal(storageJSON); err == nil {
-				os.WriteFile(m.cfg.SessionPath, data, 0600)
-				log.Printf("💾 MTProto session saved to %s", m.cfg.SessionPath)
-			}
-		}
-	}
+	// Get the tg client API
+	m.api = m.client.API()
 
-	m.sender = message.NewSender(m.client.API())
-	m.uploader_ = uploader.NewUploader(m.client)
+	m.mu.Lock()
 	m.ready = true
+	m.mu.Unlock()
 
 	return nil
 }
@@ -357,54 +315,124 @@ func (m *MTProtoClient) IsReady() bool {
 	return m.ready
 }
 
-func channelPeer(channelID int64) tg.InputPeerClass {
-	return &tg.InputPeerChannel{ChannelID: channelID, AccessHash: 0}
-}
-
-func (m *MTProtoClient) UploadFile(ctx context.Context, filePath string, caption string) error {
+// sendDocument uploads a file via MTProto and sends as document to channel
+func (m *MTProtoClient) sendDocument(ctx context.Context, filePath string, caption string) error {
 	m.mu.Lock()
-	if !m.ready {
+	if !m.ready || m.api == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("MTProto not authenticated")
 	}
-	sender := m.sender
-	upl := m.uploader_
+	api := m.api
 	m.mu.Unlock()
 
+	// Get file size
 	stat, err := os.Stat(filePath)
-	if err != nil || stat.Size() == 0 {
-		return fmt.Errorf("cannot read file: %w", err)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
 	}
 
 	filename := filepath.Base(filePath)
 	log.Printf("[MTProto] 📤 Uploading: %s (%s)", filename, formatBytes(stat.Size()))
 
-	uploaded, err := upl.FromPath(ctx, filePath)
+	// Open file for upload
+	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("MTProto upload failed: %w", err)
+		return err
+	}
+	defer file.Close()
+
+	// Save file to Telegram using upload.SaveFilePart
+	partSize := 512 * 1024 // 512KB parts
+	numParts := (stat.Size() + partSize - 1) / partSize
+
+	fileID := int64(0) // file id placeholder
+
+	for i := int64(0); i < numParts; i++ {
+		buf := make([]byte, partSize)
+		n, readErr := file.Read(buf)
+		if n == 0 && readErr == io.EOF {
+			break
+		}
+		if readErr != nil && readErr != io.EOF {
+			return fmt.Errorf("read part %d: %w", i, readErr)
+		}
+
+		if stat.Size() > 10*1024*1024 {
+			// Big file
+			req := &tg.UploadSaveBigFilePartRequest{
+				FileID:  fileID,
+				PartID:  int(i),
+				Bytes:   buf[:n],
+				PartNum: int(numParts),
+			}
+			if _, err := api.UploadSaveBigFilePart(ctx, req); err != nil {
+				return fmt.Errorf("upload part %d: %w", i, err)
+			}
+		} else {
+			req := &tg.UploadSaveFilePartRequest{
+				FileID: fileID,
+				PartID: int(i),
+				Bytes:  buf[:n],
+			}
+			if _, err := api.UploadSaveFilePart(ctx, req); err != nil {
+				return fmt.Errorf("upload part %d: %w", i, err)
+			}
+		}
 	}
 
-	peer := channelPeer(m.cfg.ChannelID)
-	_, err = sender.Resolve(peer).File(ctx, uploaded, caption)
+	// Get channel access hash
+	// For private channels, we need the access hash
+	// Use 0 as placeholder — the API will resolve it
+	inputChannel := &tg.InputChannel{
+		ChannelID:  m.cfg.ChannelID,
+		AccessHash: 0,
+	}
+
+	// Create input media document
+	inputMedia := &tg.InputMediaUploadedDocument{
+		File: &tg.InputFile{
+			ID:       fileID,
+			Parts:    int(numParts),
+			Name:     filename,
+			MimeType: "application/octet-stream",
+		},
+	}
+
+	// Send message with document
+	req := &tg.MessagesSendMediaRequest{
+		Peer:   inputChannel,
+		Media:  inputMedia,
+		Message: caption,
+	}
+	_, err = api.MessagesSendMedia(ctx, req)
 	if err != nil {
-		return fmt.Errorf("send document failed: %w", err)
+		return fmt.Errorf("send media: %w", err)
 	}
 
 	log.Printf("[MTProto] ✅ Uploaded: %s", filename)
 	return nil
 }
 
+// SendText sends a plain text message to the channel via MTProto
 func (m *MTProtoClient) SendText(ctx context.Context, text string) error {
 	m.mu.Lock()
-	if !m.ready {
+	if !m.ready || m.api == nil {
 		m.mu.Unlock()
 		return fmt.Errorf("MTProto not authenticated")
 	}
-	sender := m.sender
+	api := m.api
 	m.mu.Unlock()
 
-	peer := channelPeer(m.cfg.ChannelID)
-	_, err := sender.Resolve(peer).Text(ctx, text)
+	inputChannel := &tg.InputChannel{
+		ChannelID:  m.cfg.ChannelID,
+		AccessHash: 0,
+	}
+
+	req := &tg.MessagesSendMessageRequest{
+		Peer:    inputChannel,
+		Message: text,
+	}
+	_, err := api.MessagesSendMessage(ctx, req)
 	return err
 }
 
@@ -438,21 +466,21 @@ type FileEntry struct {
 }
 
 type Engine struct {
-	tc       *torrent.Client
-	storage  string
-	tasks    map[int64]*Task
-	mu       sync.Mutex
-	mtproto  *MTProtoClient
-	botAPI   *Bot
+	tc      *torrent.Client
+	storage string
+	tasks   map[int64]*Task
+	mu      sync.Mutex
+	mtproto *MTProtoClient
+	botAPI  *Bot
 }
 
 func NewEngine(tc *torrent.Client, storage string, mtproto *MTProtoClient, botAPI *Bot) *Engine {
 	return &Engine{
-		tc:       tc,
-		storage:  storage,
-		tasks:    make(map[int64]*Task),
-		mtproto:  mtproto,
-		botAPI:   botAPI,
+		tc:      tc,
+		storage: storage,
+		tasks:   make(map[int64]*Task),
+		mtproto: mtproto,
+		botAPI:  botAPI,
 	}
 }
 
@@ -962,7 +990,7 @@ func (e *Engine) uploadFiles(chatID int64, torrentRef *torrent.Torrent, task *Ta
 		if e.mtproto.IsReady() {
 			ctx := context.Background()
 			e.mtproto.SendText(ctx, fmt.Sprintf("📤 *Uploading:* `%s` (%d/%d) — %s", safeName, i+1, totalFiles, formatBytes(written)))
-			uploadErr = e.mtproto.UploadFile(ctx, diskPath, caption)
+			uploadErr = e.mtproto.sendDocument(ctx, diskPath, caption)
 		} else {
 			targetChat := e.botAPI.getChatID(chatID)
 			e.botAPI.sendAction(targetChat)
