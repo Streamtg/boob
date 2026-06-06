@@ -525,60 +525,7 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	e.uploadFiles(bot, chatID, torrentRef, &taskCopy)
 }
 
-func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent, task *Task) {
-	files := task.Files
-	torrentName := task.Name
-
-	e.mu.Lock()
-	delete(e.tasks, chatID)
-	e.mu.Unlock()
-
-	ok, fail := 0, 0
-	totalFiles := len(files)
-
-	bot.sendMsg(chatID,
-		fmt.Sprintf("📤 *Starting upload:* %d file(s)", totalFiles), 0, true)
-
-	for i, fe := range files {
-		safeName := filepath.Base(fe.DisplayPath)
-
-		maxSize := int64(2000) * 1024 * 1024
-		if fe.Length > maxSize {
-			log.Printf("[%d] file too large (%s > 2GB): %s", chatID, formatBytes(fe.Length), safeName)
-			bot.sendMsg(chatID,
-				fmt.Sprintf("⚠️ *File too large:* `%s` (%s)\nTelegram limit is 2GB per file.",
-					safeName, formatBytes(fe.Length)), 0, true)
-			fail++
-			continue
-		}
-
-		caption := fmt.Sprintf("[%d/%d] %s — %s", i+1, totalFiles, torrentName, safeName)
-
-		log.Printf("[%d] 📤 uploading [%d/%d]: %s (%s)",
-			chatID, i+1, totalFiles, safeName, formatBytes(fe.Length))
-
-		bot.sendAction(chatID, "upload_document")
-
-		progMsg, _ := bot.sendMsg(chatID,
-			fmt.Sprintf("📤 *Uploading:* `%s` (%d/%d)\n📊 %s",
-				safeName, i+1, totalFiles, formatBytes(fe.Length)),
-			0, true)
-
-		// Find the file in the torrent
-		var torrentFile *torrent.File
-		if torrentRef != nil {
-			for _, f := range torrentRef.Files() {
-				if f.DisplayPath() == fe.DisplayPath {
-					torrentFile = f
-					break
-				}
-			}
-		}
-
-		var uploadedPath string
-		var uploadErr error
-
-		// saveAndUploadFile reads from torrent reader, saves permanently to disk, uploads, and deletes
+// saveAndUploadFile reads from torrent reader, saves permanently to disk, uploads, and deletes
 func (e *Engine) saveAndUploadFile(bot *Bot, chatID int64, torrentFile *torrent.File, fe FileEntry, safeName string, caption string) (bool, error) {
 	fullPath := filepath.Join(e.storage, fe.DisplayPath)
 
