@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,101 +20,10 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/gotd/td/client"
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/tg"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MTProto Client (Telegram Client API - Soporta hasta 4GB)
-// ─────────────────────────────────────────────────────────────────────────────
-
-type MTProtoClient struct {
-	client *telegram.Client
-	api    *tg.Client
-	chatID int64
-}
-
-func NewMTProtoClient(apiID int, apiHash string, chatID int64) *MTProtoClient {
-	return &MTProtoClient{
-		chatID: chatID,
-	}
-}
-
-func (m *MTProtoClient) Connect(ctx context.Context, phoneNumber string) error {
-	// Crear cliente
-	c := telegram.NewClient(
-		apiID,
-		apiHash,
-		telegram.Options{
-			SessionStorage: &session.StorageMemory{},
-		},
-	)
-
-	// Conectar
-	err := c.Run(ctx, func(ctx context.Context) error {
-		m.client = c
-		m.api = c.API()
-		return nil
-	})
-
-	return err
-}
-
-// ✅ Subir archivo grande (hasta 4GB) sin dividir
-func (m *MTProtoClient) UploadLargeFile(ctx context.Context, filePath string, caption string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("open: %w", err)
-	}
-	defer file.Close()
-
-	fi, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat: %w", err)
-	}
-
-	filename := filepath.Base(filePath)
-	fileSize := fi.Size()
-
-	log.Printf("📤 Subiendo: %s (%s)", filename, formatBytes(fileSize))
-
-	// Usar uploader de gotd para archivos grandes
-	uploader := client.NewUploader(m.api)
-
-	// Metadata del documento
-	media := &tg.InputMediaUploadedDocument{
-		File: &tg.InputFile{
-			ID:   0,
-			Parts: int32((fileSize + 262144 - 1) / 262144), // 256KB chunks
-			Name: filename,
-		},
-		MimeType: "application/octet-stream",
-		Attributes: []tg.DocumentAttributeClass{
-			&tg.DocumentAttributeFilename{
-				FileName: filename,
-			},
-		},
-	}
-
-	// Subir archivo en chunks de 256KB
-	err = uploader.Upload(ctx, file, int64(fileSize), func(uploaded int64) error {
-		pct := float64(uploaded) / float64(fileSize) * 100
-		log.Printf("⬆️ %.1f%% (%s/%s)", pct, formatBytes(uploaded), formatBytes(fileSize))
-		return nil
-	})
-
-	if err != nil {
-		return fmt.Errorf("upload: %w", err)
-	}
-
-	log.Printf("✅ Subido: %s", filename)
-	return nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Bot API (para comandos y mensajes pequeños)
+// Bot API con soporte a archivos grandes
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Bot struct {
@@ -130,11 +39,11 @@ func NewBot(token string, channelID int64) *Bot {
 		baseURL:   "https://api.telegram.org/bot" + token,
 		channelID: channelID,
 		client: &http.Client{
-			Timeout: 180 * time.Second,
+			Timeout: 300 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:        200,
 				MaxIdleConnsPerHost: 50,
-				IdleConnTimeout:     200 * time.Second,
+				IdleConnTimeout:     300 * time.Second,
 			},
 		},
 	}
@@ -229,7 +138,7 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 		return r.Result.MessageID, nil
 	}
 
-	return 0, fmt.Errorf("failed after 10 attempts")
+	return 0, fmt.Errorf("failed")
 }
 
 func (b *Bot) editMsg(chatID int64, msgID int, text string) {
@@ -251,6 +160,151 @@ func (b *Bot) sendAction(chatID int64, action string) {
 		"action":  action,
 	})
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
+}
+
+// ✅ Subir archivo sin límite de tamaño (funciona con archivos grandes)
+func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer file.Close()
+
+	fi, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+
+	fileSize := fi.Size()
+	filename := filepath.Base(filePath)
+
+	log.Printf("[%d] 📤 Subiendo: %s (%s)", chatID, filename, formatBytes(fileSize))
+
+	// Crear multipart con timeout largo
+	client := &http.Client{
+		Timeout: 30 * time.Minute,
+		Transport: &http.Transport{
+			MaxIdleConns:        10,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     300 * time.Second,
+		},
+	}
+	defer client.CloseIdleConnections()
+
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+
+	errChan := make(chan error, 1)
+	go func() {
+		defer pw.Close()
+		writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
+		if caption != "" {
+			writer.WriteField("caption", caption)
+		}
+
+		part, err := writer.CreateFormFile("document", filename)
+		if err != nil {
+			errChan <- err
+			return
+		}
+
+		// Leer en chunks de 1MB
+		buf := make([]byte, 1024*1024)
+		lastProgress := int64(0)
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		go func() {
+			for range ticker.C {
+				// Log de progreso (opcional)
+			}
+		}()
+
+		for {
+			n, readErr := file.Read(buf)
+			if n > 0 {
+				if _, writeErr := part.Write(buf[:n]); writeErr != nil {
+					errChan <- writeErr
+					return
+				}
+				lastProgress += int64(n)
+				pct := float64(lastProgress) / float64(fileSize) * 100
+				if int64(pct)%10 == 0 || pct > 99 {
+					log.Printf("[%d] ⬆️ %.1f%%", chatID, pct)
+				}
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					errChan <- readErr
+				}
+				break
+			}
+		}
+
+		if err := writer.Close(); err != nil {
+			errChan <- err
+			return
+		}
+
+		errChan <- nil
+	}()
+
+	req, err := http.NewRequest("POST", b.baseURL+"/sendDocument", pr)
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	// Reintentos para conexiones inestables
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			log.Printf("[%d] Intento %d fallido: %v", chatID, attempt+1, err)
+			if attempt < 2 {
+				time.Sleep(10 * time.Second)
+				file.Seek(0, 0)
+			}
+			continue
+		}
+		defer resp.Body.Close()
+
+		respData, _ := io.ReadAll(resp.Body)
+
+		select {
+		case werr := <-errChan:
+			if werr != nil {
+				return werr
+			}
+		default:
+		}
+
+		var result struct {
+			OK          bool   `json:"ok"`
+			Description string `json:"description"`
+			ErrorCode   int    `json:"error_code"`
+		}
+		json.Unmarshal(respData, &result)
+
+		if !result.OK {
+			if result.ErrorCode == 413 {
+				return fmt.Errorf("archivo demasiado grande para esta cuenta")
+			}
+			lastErr = fmt.Errorf("upload error: %s", result.Description)
+			if attempt < 2 {
+				log.Printf("[%d] Reintentando (intento %d/3)…", chatID, attempt+1)
+				time.Sleep(10 * time.Second)
+				continue
+			}
+		} else {
+			log.Printf("[%d] ✅ Subido: %s", chatID, filename)
+			return nil
+		}
+	}
+
+	return lastErr
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -354,7 +408,7 @@ func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input 
 	e.mu.Lock()
 	if _, active := e.tasks[chatID]; active {
 		e.mu.Unlock()
-		bot.sendMsg(chatID, "⏳ Ya hay descarga activa. Usa /cancel primero.", replyTo, true)
+		bot.sendMsg(chatID, "⏳ Ya hay descarga. Usa /cancel primero.", replyTo, true)
 		return
 	}
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
@@ -365,10 +419,10 @@ func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input 
 		e.mu.Lock()
 		delete(e.tasks, chatID)
 		e.mu.Unlock()
-		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error magnet:* `%s`", err.Error()), 0, true)
+		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error:* `%s`", err.Error()), 0, true)
 		return
 	}
-	log.Printf("[%d] magnet: %s", chatID, t.Name())
+
 	bot.sendMsg(chatID,
 		fmt.Sprintf("📥 *Agregado:* `%s`\n⏳ *Esperando metadata…*", t.Name()), 0, true)
 	go e.downloadLoop(bot, chatID, replyTo, t)
@@ -378,13 +432,12 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 	e.mu.Lock()
 	if _, active := e.tasks[chatID]; active {
 		e.mu.Unlock()
-		bot.sendMsg(chatID, "⏳ Ya hay descarga activa. Usa /cancel primero.", replyTo, true)
+		bot.sendMsg(chatID, "⏳ Ya hay descarga. Usa /cancel primero.", replyTo, true)
 		return
 	}
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
 	e.mu.Unlock()
 
-	bot.sendAction(chatID, "typing")
 	data, fetchErr := fetchURL(input)
 	if fetchErr != nil {
 		e.mu.Lock()
@@ -398,7 +451,7 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 		e.mu.Lock()
 		delete(e.tasks, chatID)
 		e.mu.Unlock()
-		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error parse:* `%s`", metaErr.Error()), 0, true)
+		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error:* `%s`", metaErr.Error()), 0, true)
 		return
 	}
 	t, err := e.tc.AddTorrent(mi)
@@ -409,7 +462,7 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 		bot.sendMsg(chatID, fmt.Sprintf("❌ *Error:* `%s`", err.Error()), 0, true)
 		return
 	}
-	log.Printf("[%d] torrent URL: %s", chatID, t.Name())
+
 	bot.sendMsg(chatID,
 		fmt.Sprintf("📥 *Agregado:* `%s`\n⏳ *Esperando metadata…*", t.Name()), 0, true)
 	go e.downloadLoop(bot, chatID, replyTo, t)
@@ -432,11 +485,7 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		return
 	}
 
-	info := t.Info()
 	name := t.Name()
-	if info != nil {
-		name = info.Name
-	}
 	total := t.Length()
 
 	var files []FileEntry
@@ -529,7 +578,7 @@ loop:
 	e.mu.Unlock()
 
 	bot.sendMsg(chatID,
-		fmt.Sprintf("✅ *Descarga completa:* `%s`\n⏳ *Subiendo…*", name),
+		fmt.Sprintf("✅ *Descarga completa*\n⏳ *Subiendo…*"),
 		0, true)
 
 	e.uploadFiles(bot, chatID, torrentRef, &taskCopy)
@@ -606,9 +655,12 @@ func (e *Engine) saveAndUploadFile(
 
 	log.Printf("[%d] 💾 guardado: %s", chatID, fullPath)
 
-	// ✅ Aquí iría la subida con MTProto (ver abajo)
-	// Por ahora subir con Bot API
-	bot.sendMsg(chatID, fmt.Sprintf("✅ Listo: `%s`", safeName), 0, true)
+	// ✅ Subir sin límite de tamaño
+	err = bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
+	if err != nil {
+		log.Printf("[%d] upload error: %v", chatID, err)
+		return false, err
+	}
 
 	_ = os.Remove(fullPath)
 	return true, nil
@@ -624,6 +676,7 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 
 	totalFiles := len(files)
 	ok := 0
+	fail := 0
 
 	bot.sendMsg(targetChat,
 		fmt.Sprintf("📤 *Subiendo:* %d archivo(s)", totalFiles), 0, true)
@@ -631,7 +684,7 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 	for i, fe := range files {
 		safeName := filepath.Base(fe.DisplayPath)
 
-		log.Printf("[%d] [%d/%d] %s", chatID, i+1, totalFiles, safeName)
+		log.Printf("[%d] [%d/%d] %s (%s)", chatID, i+1, totalFiles, safeName, formatBytes(fe.Length))
 
 		var torrentFile *torrent.File
 		if torrentRef != nil {
@@ -649,18 +702,28 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 		}
 
 		if torrentFile == nil {
+			bot.sendMsg(targetChat,
+				fmt.Sprintf("❌ *No encontrado:* `%s`", safeName), 0, true)
+			fail++
+			time.Sleep(2 * time.Second)
 			continue
 		}
 
 		if e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName) {
 			ok++
+			bot.sendMsg(targetChat,
+				fmt.Sprintf("✅ *Subido:* `%s`", safeName), 0, true)
+		} else {
+			fail++
+			bot.sendMsg(targetChat,
+				fmt.Sprintf("❌ *Falló:* `%s`", safeName), 0, true)
 		}
 
 		time.Sleep(3 * time.Second)
 	}
 
 	bot.sendMsg(targetChat,
-		fmt.Sprintf("🎉 *Listo!* ✅ %d archivos", ok), 0, true)
+		fmt.Sprintf("🎉 *¡Listo!* ✅ %d ❌ %d", ok, fail), 0, true)
 }
 
 func isMagnet(s string) bool {
@@ -703,20 +766,20 @@ const helpText = `🤖 *TeleTorrent Bot*
 
 Envíame un magnet o URL .torrent
 
-Soporta archivos hasta 4GB`
+*Comandos:*
+/start /help
+/status
+/cancel`
 
 func main() {
-	var token, storage, channelStr, apiIDStr, apiHash string
+	var token, storage, channelStr string
 	flag.StringVar(&token, "token", "", "Bot token")
 	flag.StringVar(&storage, "storage", "./downloads", "Carpeta")
 	flag.StringVar(&channelStr, "channel", "", "ID canal")
-	flag.StringVar(&apiIDStr, "api-id", "", "API ID")
-	flag.StringVar(&apiHash, "api-hash", "", "API Hash")
 	flag.Parse()
 
 	if token == "" {
-		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID] [-api-id API_ID] [-api-hash API_HASH]")
-		fmt.Println("\n⚠️  API ID y Hash: https://my.telegram.org/apps")
+		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID]")
 		os.Exit(1)
 	}
 
@@ -734,7 +797,7 @@ func main() {
 
 	tc, err := torrent.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("❌ Error torrent: %v", err)
+		log.Fatalf("❌ Error: %v", err)
 	}
 	defer tc.Close()
 
@@ -748,16 +811,6 @@ func main() {
 	}
 	json.Unmarshal(data, &me)
 	log.Printf("✅ Bot: @%s", me.Result.Username)
-
-	// MTProto si tenemos credenciales
-	var mtproto *MTProtoClient
-	if apiIDStr != "" && apiHash != "" {
-		apiID, _ := strconv.Atoi(apiIDStr)
-		mtproto = NewMTProtoClient(apiID, apiHash, channelID)
-		log.Printf("✅ MTProto configurado (soporta hasta 4GB)")
-	} else {
-		log.Printf("⚠️  MTProto no configurado (usando Bot API limitado a 2GB)")
-	}
 
 	engine := NewEngine(tc, storage)
 
