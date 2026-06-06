@@ -1,12 +1,12 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,196 +20,27 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/gotd/td/session"
-	"github.com/gotd/td/telegram"
-	"github.com/gotd/td/tg"
 )
-
-// ─────────────────────────────────────────────────────────────────────────────
-// TDLib Client Creator (Crear cliente automáticamente)
-// ─────────────────────────────────────────────────────────────────────────────
-
-type TDLibClient struct {
-	client *telegram.Client
-	api    *tg.Client
-	chatID int64
-	phone  string
-	apiID  int
-	apiHash string
-}
-
-func NewTDLibClient(apiID int, apiHash, phone string, chatID int64) *TDLibClient {
-	return &TDLibClient{
-		apiID:    apiID,
-		apiHash:  apiHash,
-		phone:    phone,
-		chatID:   chatID,
-	}
-}
-
-// ✅ Crear cliente automáticamente
-func (td *TDLibClient) Initialize(ctx context.Context) error {
-	log.Printf("🔐 Inicializando TDLib Client…")
-
-	// Crear cliente con session en memoria
-	td.client = telegram.NewClient(
-		td.apiID,
-		td.apiHash,
-		telegram.Options{
-			SessionStorage: &session.StorageMemory{},
-		},
-	)
-
-	if td.client == nil {
-		return fmt.Errorf("failed to create telegram client")
-	}
-
-	log.Printf("✅ Cliente TDLib creado exitosamente")
-	return nil
-}
-
-// ✅ Conectar y autenticar
-func (td *TDLibClient) Connect(ctx context.Context) error {
-	if td.client == nil {
-		if err := td.Initialize(ctx); err != nil {
-			return err
-		}
-	}
-
-	// Ejecutar el cliente
-	return td.client.Run(ctx, func(ctx context.Context) error {
-		td.api = td.client.API()
-
-		if td.api == nil {
-			return fmt.Errorf("API not initialized")
-		}
-
-		log.Printf("✅ Conectado a Telegram MTProto")
-
-		// Verificar si ya está autenticado
-		user, err := td.api.AuthGetAuthorization(ctx)
-		if err != nil {
-			log.Printf("⚠️  No autenticado, necesita login")
-			return td.authenticate(ctx)
-		}
-
-		// Si ya está autenticado
-		if user, ok := user.(*tg.User); ok {
-			log.Printf("✅ Autenticado como: %s", user.FirstName)
-			return nil
-		}
-
-		return nil
-	})
-}
-
-// ✅ Autenticación con número de teléfono
-func (td *TDLibClient) authenticate(ctx context.Context) error {
-	log.Printf("📱 Enviando código a: %s", td.phone)
-
-	// Solicitar código
-	req := &tg.AuthSendCodeRequest{
-		PhoneNumber: td.phone,
-		APIID:       int32(td.apiID),
-		APIHash:     td.apiHash,
-		Settings: &tg.CodeSettings{
-			AllowFlashcall: false,
-			CurrentNumber:  false,
-			AllowAppHash:   false,
-		},
-	}
-
-	sentCode, err := td.api.AuthSendCode(ctx, req)
-	if err != nil {
-		return fmt.Errorf("send code error: %w", err)
-	}
-
-	log.Printf("📨 Código enviado. Tipo: %T", sentCode)
-
-	// Aquí el usuario debe ingresar el código
-	// Por ahora retornamos error indicando que necesita autenticación manual
-	return fmt.Errorf("autenticación requiere código OTP - completa el login manualmente")
-}
-
-// ✅ Subir archivo sin límite de tamaño
-func (td *TDLibClient) UploadDocument(ctx context.Context, filePath string, fileName string) error {
-	if td.api == nil {
-		return fmt.Errorf("API not initialized")
-	}
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("open: %w", err)
-	}
-	defer file.Close()
-
-	fi, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat: %w", err)
-	}
-
-	fileSize := fi.Size()
-	log.Printf("📤 Subiendo con TDLib: %s (%s)", fileName, formatBytes(fileSize))
-
-	// Crear request de upload
-	uploadReq := &tg.InputFileRequest{
-		ID:       1,
-		Parts:    int32((fileSize + 262143) / 262144), // Chunks de 256KB
-		Name:     fileName,
-		MimeType: "application/octet-stream",
-	}
-
-	// Leer y subir archivo en chunks
-	buf := make([]byte, 256*1024) // 256KB chunks
-	partNum := 0
-
-	for {
-		n, readErr := file.Read(buf)
-		if n > 0 {
-			partNum++
-			log.Printf("⬆️ Subiendo parte %d/%d (%.1f%%)", partNum, int(uploadReq.Parts), 
-				float64(partNum)/float64(uploadReq.Parts)*100)
-
-			// Aquí iría el envío del chunk a través de MTProto
-			// Por ahora solo contamos
-		}
-
-		if readErr != nil {
-			if readErr != io.EOF {
-				return fmt.Errorf("read: %w", readErr)
-			}
-			break
-		}
-	}
-
-	log.Printf("✅ Upload completado: %s", fileName)
-	return nil
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Bot API (para mensajes pequeños y control)
-// ─────────────────────────────────────────────────────────────────────────────
 
 type Bot struct {
 	token     string
 	baseURL   string
 	client    *http.Client
 	channelID int64
-	tdlib     *TDLibClient
 }
 
-func NewBot(token string, channelID int64, tdlib *TDLibClient) *Bot {
+func NewBot(token string, channelID int64) *Bot {
 	return &Bot{
 		token:     token,
 		baseURL:   "https://api.telegram.org/bot" + token,
 		channelID: channelID,
-		tdlib:     tdlib,
 		client: &http.Client{
-			Timeout: 600 * time.Second,
+			Timeout: 0, // Sin timeout para archivos grandes
 			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 50,
-				IdleConnTimeout:     600 * time.Second,
+				MaxIdleConns:       100,
+				MaxConnsPerHost:    10,
+				IdleConnTimeout:    600 * time.Second,
+				DisableCompression: false,
 			},
 		},
 	}
@@ -325,23 +156,8 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-// ✅ Subir con TDLib para archivos grandes
-func (b *Bot) uploadFileTDLib(chatID int64, filePath string, caption string) error {
-	if b.tdlib == nil || b.tdlib.api == nil {
-		return fmt.Errorf("TDLib not available")
-	}
-
-	fileName := filepath.Base(filePath)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
-
-	log.Printf("[%d] 📤 Subiendo con TDLib: %s", chatID, fileName)
-
-	return b.tdlib.UploadDocument(ctx, filePath, fileName)
-}
-
-// ✅ Subir con Bot API para archivos pequeños
-func (b *Bot) uploadFileBot(chatID int64, filePath string, caption string) error {
+// ✅ Subir archivo GRANDE sin límite - Optimizado
+func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
@@ -356,19 +172,23 @@ func (b *Bot) uploadFileBot(chatID int64, filePath string, caption string) error
 	fileSize := fi.Size()
 	filename := filepath.Base(filePath)
 
-	log.Printf("[%d] 📤 Subiendo con Bot API: %s (%s)", chatID, filename, formatBytes(fileSize))
+	log.Printf("[%d] 📤 Subiendo: %s (%s)", chatID, filename, formatBytes(fileSize))
 
+	// Cliente HTTP especial para archivos grandes
 	client := &http.Client{
-		Timeout: 1 * time.Hour,
+		Timeout: 0, // Sin timeout
 		Transport: &http.Transport{
-			MaxIdleConns:        5,
-			MaxIdleConnsPerHost: 5,
-			IdleConnTimeout:     300 * time.Second,
+			MaxIdleConns:       1,
+			MaxConnsPerHost:    1,
+			IdleConnTimeout:    600 * time.Second,
+			DisableCompression: true,
 		},
 	}
 	defer client.CloseIdleConnections()
 
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
+		file.Seek(0, 0)
+
 		pr, pw := io.Pipe()
 		writer := multipart.NewWriter(pw)
 
@@ -386,29 +206,14 @@ func (b *Bot) uploadFileBot(chatID int64, filePath string, caption string) error
 				return
 			}
 
-			buf := make([]byte, 2*1024*1024)
-			lastProgress := int64(0)
-
-			for {
-				n, readErr := file.Read(buf)
-				if n > 0 {
-					if _, writeErr := part.Write(buf[:n]); writeErr != nil {
-						errChan <- writeErr
-						return
-					}
-					lastProgress += int64(n)
-					pct := float64(lastProgress) / float64(fileSize) * 100
-					if int64(pct)%5 == 0 {
-						log.Printf("[%d] ⬆️ %.1f%%", chatID, pct)
-					}
-				}
-				if readErr != nil {
-					if readErr != io.EOF {
-						errChan <- readErr
-					}
-					break
-				}
+			// Usar io.CopyN para leer exactamente el número de bytes
+			written, err := io.CopyBuffer(part, file, make([]byte, 4*1024*1024))
+			if err != nil && err != io.EOF {
+				errChan <- err
+				return
 			}
+
+			log.Printf("[%d] ✓ Leídos %s", chatID, formatBytes(written))
 
 			if err := writer.Close(); err != nil {
 				errChan <- err
@@ -424,13 +229,25 @@ func (b *Bot) uploadFileBot(chatID int64, filePath string, caption string) error
 		}
 
 		req.Header.Set("Content-Type", writer.FormDataContentType())
+		// Headers importantes para archivos grandes
+		req.Header.Set("Connection", "keep-alive")
+		req.Header.Set("Transfer-Encoding", "chunked")
+
+		log.Printf("[%d] ⬆️ Intento %d/5 de subida…", chatID, attempt+1)
 
 		resp, err := client.Do(req)
 		if err != nil {
-			log.Printf("[%d] Intento %d falló: %v", chatID, attempt+1, err)
-			if attempt < 2 {
-				time.Sleep(10 * time.Second)
-				file.Seek(0, 0)
+			log.Printf("[%d] Error HTTP (intento %d): %v", chatID, attempt+1, err)
+
+			select {
+			case <-errChan:
+			default:
+			}
+
+			if attempt < 4 {
+				espera := time.Duration((attempt+1)*10) * time.Second
+				log.Printf("[%d] ⏳ Reintentando en %v…", chatID, espera)
+				time.Sleep(espera)
 			}
 			continue
 		}
@@ -441,7 +258,12 @@ func (b *Bot) uploadFileBot(chatID int64, filePath string, caption string) error
 		select {
 		case werr := <-errChan:
 			if werr != nil {
-				log.Printf("[%d] Writer error: %v", chatID, werr)
+				log.Printf("[%d] Error writer: %v", chatID, werr)
+				if attempt < 4 {
+					time.Sleep(5 * time.Second)
+					continue
+				}
+				return werr
 			}
 		default:
 		}
@@ -454,20 +276,20 @@ func (b *Bot) uploadFileBot(chatID int64, filePath string, caption string) error
 		json.Unmarshal(respData, &result)
 
 		if result.OK {
-			log.Printf("[%d] ✅ Subido: %s", chatID, filename)
+			log.Printf("[%d] ✅ Subido exitosamente: %s", chatID, filename)
 			return nil
 		}
 
-		log.Printf("[%d] Error (código %d): %s", chatID, result.ErrorCode, result.Description)
+		log.Printf("[%d] API error (código %d): %s", chatID, result.ErrorCode, result.Description)
 
-		if attempt < 2 {
-			log.Printf("[%d] Reintentando…", chatID)
-			time.Sleep(15 * time.Second)
-			file.Seek(0, 0)
+		if attempt < 4 {
+			espera := time.Duration((attempt+1)*15) * time.Second
+			log.Printf("[%d] ⏳ Reintentando en %v…", chatID, espera)
+			time.Sleep(espera)
 		}
 	}
 
-	return fmt.Errorf("upload failed")
+	return fmt.Errorf("upload failed after 5 attempts")
 }
 
 type Task struct {
@@ -771,25 +593,12 @@ func (e *Engine) saveAndUploadFile(
 		N: fe.Length,
 	}
 
-	buf := make([]byte, 512*1024)
-
-	for {
-		n, readErr := limitedReader.Read(buf)
-		if n > 0 {
-			if _, writeErr := outFile.Write(buf[:n]); writeErr != nil {
-				outFile.Close()
-				os.Remove(fullPath)
-				return false, fmt.Errorf("write: %w", writeErr)
-			}
-		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				outFile.Close()
-				os.Remove(fullPath)
-				return false, fmt.Errorf("read: %w", readErr)
-			}
-			break
-		}
+	// Copiar con buffer eficiente
+	_, err = io.CopyBuffer(outFile, limitedReader, make([]byte, 4*1024*1024))
+	if err != nil && err != io.EOF {
+		outFile.Close()
+		os.Remove(fullPath)
+		return false, fmt.Errorf("copy: %w", err)
 	}
 
 	if err := outFile.Sync(); err != nil {
@@ -805,28 +614,16 @@ func (e *Engine) saveAndUploadFile(
 	fi, err := os.Stat(fullPath)
 	if err != nil || fi.Size() != fe.Length {
 		os.Remove(fullPath)
-		return false, fmt.Errorf("tamaño incorrecto")
+		return false, fmt.Errorf("tamaño incorrecto: %d vs %d", fi.Size(), fe.Length)
 	}
 
 	log.Printf("[%d] 💾 guardado: %s (%s)", chatID, fullPath, formatBytes(fi.Size()))
 
-	// ✅ Decidir si usar TDLib o Bot API
-	var uploadErr error
-	if fi.Size() > 1*1024*1024*1024 && bot.tdlib != nil && bot.tdlib.api != nil {
-		// Archivos >1GB: intentar TDLib
-		uploadErr = bot.uploadFileTDLib(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
-		if uploadErr != nil {
-			log.Printf("[%d] TDLib falló, usando Bot API…", chatID)
-			uploadErr = bot.uploadFileBot(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
-		}
-	} else {
-		// Archivos pequeños: Bot API
-		uploadErr = bot.uploadFileBot(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
-	}
-
-	if uploadErr != nil {
-		log.Printf("[%d] upload error: %v", chatID, uploadErr)
-		return false, uploadErr
+	// ✅ Subir con reintentos x5
+	err = bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
+	if err != nil {
+		log.Printf("[%d] upload error: %v", chatID, err)
+		return false, err
 	}
 
 	_ = os.Remove(fullPath)
@@ -845,14 +642,8 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 	ok := 0
 	fail := 0
 
-	msg := "📤 *Subiendo:* %d archivo(s)\n"
-	if bot.tdlib != nil && bot.tdlib.api != nil {
-		msg += "🚀 Con TDLib + Bot API"
-	} else {
-		msg += "📨 Con Bot API"
-	}
-
-	bot.sendMsg(targetChat, fmt.Sprintf(msg, totalFiles), 0, true)
+	bot.sendMsg(targetChat,
+		fmt.Sprintf("📤 *Subiendo:* %d archivo(s)\n🔄 5 reintentos automáticos", totalFiles), 0, true)
 
 	for i, fe := range files {
 		safeName := filepath.Base(fe.DisplayPath)
@@ -940,10 +731,11 @@ const helpText = `🤖 *TeleTorrent Bot*
 
 Envíame magnet o URL .torrent
 
-*Con TDLib MTProto:*
-✅ Archivos sin límite
-✅ Mejor velocidad
-✅ Fallback automático
+*Características:*
+✅ Descarga automática
+✅ Subida con 5 reintentos
+✅ Sin límite de tamaño (Telegram)
+✅ Progreso en tiempo real
 
 *Comandos:*
 /start /help
@@ -951,17 +743,14 @@ Envíame magnet o URL .torrent
 /cancel`
 
 func main() {
-	var token, storage, channelStr, apiIDStr, apiHashStr, phoneStr string
+	var token, storage, channelStr string
 	flag.StringVar(&token, "token", "", "Bot token")
 	flag.StringVar(&storage, "storage", "./downloads", "Carpeta")
 	flag.StringVar(&channelStr, "channel", "", "ID canal")
-	flag.StringVar(&apiIDStr, "api-id", "", "API ID TDLib")
-	flag.StringVar(&apiHashStr, "api-hash", "", "API Hash TDLib")
-	flag.StringVar(&phoneStr, "phone", "", "Tu teléfono TDLib")
 	flag.Parse()
 
 	if token == "" {
-		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID] [-api-id ID] [-api-hash HASH] [-phone +34123456789]")
+		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID]")
 		os.Exit(1)
 	}
 
@@ -983,24 +772,7 @@ func main() {
 	}
 	defer tc.Close()
 
-	// ✅ Crear TDLib client automáticamente
-	var tdlib *TDLibClient
-	if apiIDStr != "" && apiHashStr != "" && phoneStr != "" {
-		apiID, _ := strconv.Atoi(apiIDStr)
-		tdlib = NewTDLibClient(apiID, apiHashStr, phoneStr, channelID)
-
-		// Inicializar TDLib
-		if err := tdlib.Initialize(context.Background()); err != nil {
-			log.Printf("⚠️  TDLib init error: %v (usando solo Bot API)", err)
-			tdlib = nil
-		} else {
-			log.Printf("✅ TDLib cliente creado automáticamente")
-		}
-	} else {
-		log.Printf("ℹ️  TDLib no configurado (usando Bot API)")
-	}
-
-	bot := NewBot(token, channelID, tdlib)
+	bot := NewBot(token, channelID)
 	data, _ := bot.api("getMe", nil)
 	var me struct {
 		OK     bool `json:"ok"`
@@ -1043,7 +815,3 @@ func main() {
 		}
 	}
 }
-
-import (
-	"mime/multipart"
-)
