@@ -267,10 +267,6 @@ func (e *Engine) cmdCancel(bot *Bot, chatID int64, replyTo int) {
 		bot.sendMsg(chatID, "📭 Nothing to cancel.", replyTo, true)
 		return
 	}
-	t := e.tasks[chatID]
-	e.mu.Unlock()
-
-	e.mu.Lock()
 	delete(e.tasks, chatID)
 	e.mu.Unlock()
 	bot.sendMsg(chatID, "🚫 Download cancelled.", replyTo, true)
