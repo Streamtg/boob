@@ -38,11 +38,11 @@ func NewBot(token string) *Bot {
 		token:   token,
 		baseURL: "https://api.telegram.org/bot" + token,
 		client: &http.Client{
-			Timeout: 0,
+			Timeout: 180 * time.Second, // Long timeout for long-polling
 			Transport: &http.Transport{
-				MaxIdleConns:        5,
-				MaxIdleConnsPerHost: 5,
-				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConns:        200,
+				MaxIdleConnsPerHost: 50,
+				IdleConnTimeout:     200 * time.Second,
 			},
 		},
 	}
@@ -53,9 +53,9 @@ func uploadClient() *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Minute,
 		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     60 * time.Second,
+			MaxIdleConns:        20,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     120 * time.Second,
 		},
 	}
 }
@@ -799,8 +799,8 @@ func main() {
 			"offset":  strconv.Itoa(offset),
 		})
 		if err != nil {
-			log.Printf("⚠️  getUpdates error: %v", err)
-			time.Sleep(3 * time.Second)
+			log.Printf("⚠️  getUpdates error: %v — retrying in 5s", err)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 
@@ -810,7 +810,13 @@ func main() {
 		}
 		json.Unmarshal(data, &ups)
 
-		if !ups.OK || len(ups.Result) == 0 {
+		if !ups.OK {
+			log.Printf("⚠️  API returned !ok — retrying in 5s")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if len(ups.Result) == 0 {
 			continue
 		}
 
