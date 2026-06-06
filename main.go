@@ -35,7 +35,7 @@ func NewBot(token string, channelID int64) *Bot {
 		baseURL:   "https://api.telegram.org/bot" + token,
 		channelID: channelID,
 		client: &http.Client{
-			Timeout: 0, // Sin timeout para archivos grandes
+			Timeout: 0,
 			Transport: &http.Transport{
 				MaxIdleConns:       100,
 				MaxConnsPerHost:    10,
@@ -156,7 +156,6 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-// ✅ Subir archivo GRANDE sin límite - Optimizado
 func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -174,9 +173,8 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 
 	log.Printf("[%d] 📤 Subiendo: %s (%s)", chatID, filename, formatBytes(fileSize))
 
-	// Cliente HTTP especial para archivos grandes
 	client := &http.Client{
-		Timeout: 0, // Sin timeout
+		Timeout: 0,
 		Transport: &http.Transport{
 			MaxIdleConns:       1,
 			MaxConnsPerHost:    1,
@@ -206,14 +204,13 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 				return
 			}
 
-			// Usar io.CopyN para leer exactamente el número de bytes
-			written, err := io.CopyBuffer(part, file, make([]byte, 4*1024*1024))
+			_, err = io.CopyBuffer(part, file, make([]byte, 4*1024*1024))
 			if err != nil && err != io.EOF {
 				errChan <- err
 				return
 			}
 
-			log.Printf("[%d] ✓ Leídos %s", chatID, formatBytes(written))
+			log.Printf("[%d] ✓ Archivo leído completamente", chatID)
 
 			if err := writer.Close(); err != nil {
 				errChan <- err
@@ -229,7 +226,6 @@ func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) err
 		}
 
 		req.Header.Set("Content-Type", writer.FormDataContentType())
-		// Headers importantes para archivos grandes
 		req.Header.Set("Connection", "keep-alive")
 		req.Header.Set("Transfer-Encoding", "chunked")
 
@@ -593,12 +589,12 @@ func (e *Engine) saveAndUploadFile(
 		N: fe.Length,
 	}
 
-	// Copiar con buffer eficiente
-	_, err = io.CopyBuffer(outFile, limitedReader, make([]byte, 4*1024*1024))
-	if err != nil && err != io.EOF {
+	// ✅ FIX: No usar err aquí
+	_, copyErr := io.CopyBuffer(outFile, limitedReader, make([]byte, 4*1024*1024))
+	if copyErr != nil && copyErr != io.EOF {
 		outFile.Close()
 		os.Remove(fullPath)
-		return false, fmt.Errorf("copy: %w", err)
+		return false, fmt.Errorf("copy: %w", copyErr)
 	}
 
 	if err := outFile.Sync(); err != nil {
@@ -619,11 +615,10 @@ func (e *Engine) saveAndUploadFile(
 
 	log.Printf("[%d] 💾 guardado: %s (%s)", chatID, fullPath, formatBytes(fi.Size()))
 
-	// ✅ Subir con reintentos x5
-	err = bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
-	if err != nil {
-		log.Printf("[%d] upload error: %v", chatID, err)
-		return false, err
+	uploadErr := bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
+	if uploadErr != nil {
+		log.Printf("[%d] upload error: %v", chatID, uploadErr)
+		return false, uploadErr
 	}
 
 	_ = os.Remove(fullPath)
@@ -673,7 +668,7 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 			continue
 		}
 
-		success, err := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName)
+		success, uploadErr := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName)
 		if success {
 			ok++
 			bot.sendMsg(targetChat,
@@ -734,7 +729,7 @@ Envíame magnet o URL .torrent
 *Características:*
 ✅ Descarga automática
 ✅ Subida con 5 reintentos
-✅ Sin límite de tamaño (Telegram)
+✅ Sin límite de tamaño
 ✅ Progreso en tiempo real
 
 *Comandos:*
