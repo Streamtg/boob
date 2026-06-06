@@ -396,7 +396,74 @@ func (e *Engine) cmdStatus(bot *Bot, chatID int64, replyTo int) {
 	bot.sendMsg(chatID, msg, replyTo, true)
 }
 
-func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input string) {
+// validTrackerScheme returns true for tracker schemes the library supports
+func validTrackerScheme(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	return scheme == "udp" || scheme == "http" || scheme == "https"
+}
+
+// cleanMagnetURL removes trackers with invalid schemes (like "DHT") that crash the library
+func cleanMagnetURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "magnet:?") {
+		return raw
+	}
+
+	// Parse the magnet URI
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+
+	// Get all tr= parameters
+	rawTrackers := u.Query()["tr"]
+	if len(rawTrackers) == 0 {
+		return raw // No trackers to clean
+	}
+
+	// Filter to only valid schemes (udp, http, https)
+	var validTrackers []string
+	for _, tr := range rawTrackers {
+		if validTrackerScheme(tr) {
+			validTrackers = append(validTrackers, tr)
+		} else {
+			log.Printf("⚠️  Removed invalid tracker: %s", tr)
+		}
+	}
+
+	// Reconstruct magnet URL with only valid trackers
+	if len(validTrackers) == 0 {
+		log.Printf("⚠️  All trackers filtered out from magnet (none had udp/http/https scheme)")
+	}
+
+	// Build query with filtered trackers
+	q := url.Values{}
+	for k, vals := range u.Query() {
+		if k == "tr" {
+			for _, v := range validTrackers {
+				q.Add(k, v)
+			}
+		} else {
+			for _, v := range vals {
+				q.Add(k, v)
+			}
+		}
+	}
+
+	// Reconstruct scheme://host/path
+	rebuilt := u.Scheme + "://" + u.Host + u.Path
+	if len(q) > 0 {
+		rebuilt += "?" + q.Encode()
+	}
+
+	return rebuilt
+}
+
+func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, rawMagnet string) {
 	e.mu.Lock()
 	if _, active := e.tasks[chatID]; active {
 		e.mu.Unlock()
@@ -406,15 +473,37 @@ func (e *Engine) startDownloadMagnet(bot *Bot, chatID int64, replyTo int, input 
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
 	e.mu.Unlock()
 
-	clean := strings.TrimSpace(input)
-	t, err := e.tc.AddMagnet(clean)
-	if err != nil {
+	// Clean the magnet URL to remove invalid tracker schemes (e.g. "DHT") that crash the library
+	cleaned := cleanMagnetURL(rawMagnet)
+	log.Printf("[%d] cleaned magnet: %s", chatID, cleaned)
+
+	// Add magnet inside a recover block to catch any panic from the torrent library
+	var t *torrent.Torrent
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[%d] PANIC in AddMagnet (recovered): %v", chatID, r)
+			}
+		}()
+		var err error
+		t, err = e.tc.AddMagnet(cleaned)
+		if err != nil {
+			e.mu.Lock()
+			delete(e.tasks, chatID)
+			e.mu.Unlock()
+			bot.sendMsg(chatID, fmt.Sprintf("❌ *Magnet error:* `%s`", err.Error()), 0, true)
+			return
+		}
+	}()
+
+	if t == nil {
 		e.mu.Lock()
 		delete(e.tasks, chatID)
 		e.mu.Unlock()
-		bot.sendMsg(chatID, fmt.Sprintf("❌ *Magnet error:* `%s`", err.Error()), 0, true)
+		bot.sendMsg(chatID, "❌ *Magnet failed silently (library panic was recovered)*", 0, true)
 		return
 	}
+
 	log.Printf("[%d] magnet added: %s", chatID, t.Name())
 
 	bot.sendMsg(chatID, fmt.Sprintf("📥 *Added:* `%s`\n⏳ *Waiting for metadata…*", t.Name()), 0, true)
@@ -485,6 +574,9 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[%d] panic recovered in downloadLoop: %v", chatID, r)
+			e.mu.Lock()
+			delete(e.tasks, chatID)
+			e.mu.Unlock()
 		}
 	}()
 
@@ -515,6 +607,10 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	}
 
 	e.mu.Lock()
+	if e.tasks[chatID] == nil {
+		e.mu.Unlock()
+		return
+	}
 	e.tasks[chatID].Name = name
 	e.tasks[chatID].Files = files
 	e.tasks[chatID].TotalBytes = total
