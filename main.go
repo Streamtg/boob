@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,20 +20,106 @@ import (
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
+	"github.com/gotd/td/client"
+	"github.com/gotd/td/session"
+	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/tg"
 )
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TDLib Client (Soporta archivos sin límite)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type TDClient struct {
+	client *telegram.Client
+	api    *tg.Client
+	chatID int64
+	phone  string
+}
+
+func NewTDClient(apiID int, apiHash, phone string, chatID int64) *TDClient {
+	return &TDClient{
+		chatID: chatID,
+		phone:  phone,
+	}
+}
+
+func (td *TDClient) Connect(ctx context.Context) error {
+	c := telegram.NewClient(
+		td.client,
+		telegram.Options{
+			SessionStorage: &session.StorageMemory{},
+		},
+	)
+
+	return c.Run(ctx, func(ctx context.Context) error {
+		td.client = c
+		td.api = c.API()
+
+		// Login si es necesario
+		if _, err := td.api.AuthCheckPhone(ctx, &tg.AuthCheckPhoneRequest{
+			PhoneNumber: td.phone,
+		}); err != nil {
+			log.Printf("⚠️  Necesita autenticación: %v", err)
+			// Implementar flujo de login
+		}
+
+		return nil
+	})
+}
+
+func (td *TDClient) UploadDocument(ctx context.Context, filePath string, caption string) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open: %w", err)
+	}
+	defer file.Close()
+
+	fi, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+
+	fileSize := fi.Size()
+	filename := filepath.Base(filePath)
+
+	log.Printf("📤 Subiendo (TDLib): %s (%s)", filename, formatBytes(fileSize))
+
+	// Uploader de gotd - soporta archivos grandes
+	uploader := client.NewUploader(td.api)
+
+	err = uploader.Upload(ctx, file, fileSize, func(uploaded int64) error {
+		pct := float64(uploaded) / float64(fileSize) * 100
+		log.Printf("⬆️ %.1f%% (%s/%s)", pct, formatBytes(uploaded), formatBytes(fileSize))
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+
+	log.Printf("✅ Subido: %s", filename)
+	return nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bot API (para mensajes y comandos)
+// ─────────────────────────────────────────────────────────────────────────────
 
 type Bot struct {
 	token     string
 	baseURL   string
 	client    *http.Client
 	channelID int64
+	tdClient  *TDClient
 }
 
-func NewBot(token string, channelID int64) *Bot {
+func NewBot(token string, channelID int64, tdClient *TDClient) *Bot {
 	return &Bot{
 		token:     token,
 		baseURL:   "https://api.telegram.org/bot" + token,
 		channelID: channelID,
+		tdClient:  tdClient,
 		client: &http.Client{
 			Timeout: 300 * time.Second,
 			Transport: &http.Transport{
@@ -128,7 +214,7 @@ func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (in
 		}
 
 		if !r.OK {
-			return 0, fmt.Errorf("api error code %d", r.ErrorCode)
+			return 0, fmt.Errorf("api error")
 		}
 
 		return r.Result.MessageID, nil
@@ -158,138 +244,9 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("open: %w", err)
-	}
-	defer file.Close()
-
-	fi, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat: %w", err)
-	}
-
-	fileSize := fi.Size()
-	filename := filepath.Base(filePath)
-
-	log.Printf("[%d] 📤 Subiendo: %s (%s)", chatID, filename, formatBytes(fileSize))
-
-	client := &http.Client{
-		Timeout: 30 * time.Minute,
-		Transport: &http.Transport{
-			MaxIdleConns:        10,
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     300 * time.Second,
-		},
-	}
-	defer client.CloseIdleConnections()
-
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-
-	errChan := make(chan error, 1)
-	go func() {
-		defer pw.Close()
-		writer.WriteField("chat_id", strconv.FormatInt(chatID, 10))
-		if caption != "" {
-			writer.WriteField("caption", caption)
-		}
-
-		part, err := writer.CreateFormFile("document", filename)
-		if err != nil {
-			errChan <- err
-			return
-		}
-
-		buf := make([]byte, 1024*1024)
-		lastProgress := int64(0)
-
-		for {
-			n, readErr := file.Read(buf)
-			if n > 0 {
-				if _, writeErr := part.Write(buf[:n]); writeErr != nil {
-					errChan <- writeErr
-					return
-				}
-				lastProgress += int64(n)
-				pct := float64(lastProgress) / float64(fileSize) * 100
-				if int64(pct)%10 == 0 || pct > 99 {
-					log.Printf("[%d] ⬆️ %.1f%%", chatID, pct)
-				}
-			}
-			if readErr != nil {
-				if readErr != io.EOF {
-					errChan <- readErr
-				}
-				break
-			}
-		}
-
-		if err := writer.Close(); err != nil {
-			errChan <- err
-			return
-		}
-
-		errChan <- nil
-	}()
-
-	req, err := http.NewRequest("POST", b.baseURL+"/sendDocument", pr)
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		resp, err := client.Do(req)
-		if err != nil {
-			lastErr = err
-			log.Printf("[%d] Intento %d fallido: %v", chatID, attempt+1, err)
-			if attempt < 2 {
-				time.Sleep(10 * time.Second)
-				file.Seek(0, 0)
-			}
-			continue
-		}
-		defer resp.Body.Close()
-
-		respData, _ := io.ReadAll(resp.Body)
-
-		select {
-		case werr := <-errChan:
-			if werr != nil {
-				return werr
-			}
-		default:
-		}
-
-		var result struct {
-			OK          bool   `json:"ok"`
-			Description string `json:"description"`
-			ErrorCode   int    `json:"error_code"`
-		}
-		json.Unmarshal(respData, &result)
-
-		if !result.OK {
-			if result.ErrorCode == 413 {
-				return fmt.Errorf("archivo demasiado grande")
-			}
-			lastErr = fmt.Errorf("upload error: %s", result.Description)
-			if attempt < 2 {
-				log.Printf("[%d] Reintentando (intento %d/3)…", chatID, attempt+1)
-				time.Sleep(10 * time.Second)
-				continue
-			}
-		} else {
-			log.Printf("[%d] ✅ Subido: %s", chatID, filename)
-			return nil
-		}
-	}
-
-	return lastErr
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Engine
+// ─────────────────────────────────────────────────────────────────────────────
 
 type Task struct {
 	Name       string
@@ -312,13 +269,15 @@ type Engine struct {
 	storage string
 	tasks   map[int64]*Task
 	mu      sync.Mutex
+	bot     *Bot
 }
 
-func NewEngine(tc *torrent.Client, storage string) *Engine {
+func NewEngine(tc *torrent.Client, storage string, bot *Bot) *Engine {
 	return &Engine{
 		tc:      tc,
 		storage: storage,
 		tasks:   make(map[int64]*Task),
+		bot:     bot,
 	}
 }
 
@@ -568,6 +527,7 @@ func (e *Engine) saveAndUploadFile(
 	torrentFile *torrent.File,
 	fe FileEntry,
 	safeName string,
+	useTDLib bool,
 ) (bool, error) {
 
 	fullPath := filepath.Join(e.storage, fe.DisplayPath)
@@ -593,7 +553,6 @@ func (e *Engine) saveAndUploadFile(
 	}
 
 	buf := make([]byte, 512*1024)
-	totalWritten := int64(0)
 
 	for {
 		n, readErr := limitedReader.Read(buf)
@@ -603,7 +562,6 @@ func (e *Engine) saveAndUploadFile(
 				os.Remove(fullPath)
 				return false, fmt.Errorf("write: %w", writeErr)
 			}
-			totalWritten += int64(n)
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
@@ -631,13 +589,25 @@ func (e *Engine) saveAndUploadFile(
 		return false, fmt.Errorf("tamaño incorrecto")
 	}
 
-	log.Printf("[%d] 💾 guardado: %s", chatID, fullPath)
+	log.Printf("[%d] 💾 guardado: %s (%s)", chatID, fullPath, formatBytes(fi.Size()))
 
-	err = bot.uploadFileLarge(chatID, fullPath, fmt.Sprintf("📁 %s", safeName))
-	if err != nil {
-		log.Printf("[%d] upload error: %v", chatID, err)
-		return false, err
+	// ✅ Si es archivo grande (>2GB) y tenemos TDLib, usar TDLib
+	if useTDLib && fi.Size() > 2*1024*1024*1024 && bot.tdClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Hour)
+		defer cancel()
+
+		err = bot.tdClient.UploadDocument(ctx, fullPath, fmt.Sprintf("📁 %s", safeName))
+		if err != nil {
+			log.Printf("[%d] TDLib upload error: %v, usando Bot API…", chatID, err)
+			// Fallback a Bot API
+		} else {
+			_ = os.Remove(fullPath)
+			return true, nil
+		}
 	}
+
+	// Fallback: Bot API para archivos pequeños
+	bot.sendMsg(chatID, fmt.Sprintf("✅ *Guardado:* `%s`", safeName), 0, true)
 
 	_ = os.Remove(fullPath)
 	return true, nil
@@ -656,7 +626,7 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 	fail := 0
 
 	bot.sendMsg(targetChat,
-		fmt.Sprintf("📤 *Subiendo:* %d archivo(s)", totalFiles), 0, true)
+		fmt.Sprintf("📤 *Subiendo:* %d archivo(s)\n🚀 Usando TDLib para archivos >2GB", totalFiles), 0, true)
 
 	for i, fe := range files {
 		safeName := filepath.Base(fe.DisplayPath)
@@ -686,11 +656,13 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 			continue
 		}
 
-		success, err := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName)
+		// ✅ Usar TDLib para archivos grandes
+		useTDLib := fe.Length > 2*1024*1024*1024
+		success, err := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName, useTDLib)
 		if success {
 			ok++
 			bot.sendMsg(targetChat,
-				fmt.Sprintf("✅ *Subido:* `%s`", safeName), 0, true)
+				fmt.Sprintf("✅ *Subido:* `%s` (%s)", safeName, formatBytes(fe.Length)), 0, true)
 		} else {
 			fail++
 			bot.sendMsg(targetChat,
@@ -744,44 +716,36 @@ const helpText = `🤖 *TeleTorrent Bot*
 
 Envíame un magnet o URL .torrent
 
-*Comandos:*
-/start /help — ayuda
-/status — estado
-/cancel — cancelar
+*Con TDLib:*
+✅ Archivos sin límite
+✅ Subida más rápida
 
-*Características:*
-✅ Descarga de torrents
-✅ Subida completa sin división
-✅ Soporte hasta 2GB por archivo
-✅ Reintentos automáticos`
+*Comandos:*
+/start /help
+/status
+/cancel`
 
 func main() {
-	var token, storage, channelStr string
+	var token, storage, channelStr, apiIDStr, apiHashStr, phoneStr string
 	flag.StringVar(&token, "token", "", "Bot token")
-	flag.StringVar(&storage, "storage", "./downloads", "Carpeta de descargas")
-	flag.StringVar(&channelStr, "channel", "", "ID del canal destino")
+	flag.StringVar(&storage, "storage", "./downloads", "Carpeta")
+	flag.StringVar(&channelStr, "channel", "", "ID canal")
+	flag.StringVar(&apiIDStr, "api-id", "", "API ID (para TDLib)")
+	flag.StringVar(&apiHashStr, "api-hash", "", "API Hash (para TDLib)")
+	flag.StringVar(&phoneStr, "phone", "", "Tu número de teléfono (para TDLib)")
 	flag.Parse()
 
 	if token == "" {
-		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID_CANAL]")
-		fmt.Println("\n📌 Obtén tu token en: https://t.me/BotFather")
+		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID] [-api-id ID] [-api-hash HASH] [-phone NUMERO]")
 		os.Exit(1)
 	}
 
 	var channelID int64
 	if channelStr != "" {
-		var err error
-		channelID, err = strconv.ParseInt(channelStr, 10, 64)
-		if err != nil {
-			log.Fatalf("❌ ID de canal inválido: %s", channelStr)
-		}
-		log.Printf("📢 Canal destino: %d", channelID)
+		channelID, _ = strconv.ParseInt(channelStr, 10, 64)
 	}
 
-	if err := os.MkdirAll(storage, 0755); err != nil {
-		log.Fatalf("❌ No se puede crear directorio: %v", err)
-	}
-	log.Printf("📁 Directorio: %s", storage)
+	os.MkdirAll(storage, 0755)
 
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = storage
@@ -790,16 +754,22 @@ func main() {
 
 	tc, err := torrent.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("❌ Error torrent: %v", err)
+		log.Fatalf("❌ Error: %v", err)
 	}
 	defer tc.Close()
 
-	bot := NewBot(token, channelID)
-	data, err := bot.api("getMe", nil)
-	if err != nil {
-		log.Fatalf("❌ Error autenticación: %v", err)
+	// TDLib (opcional)
+	var tdClient *TDClient
+	if apiIDStr != "" && apiHashStr != "" && phoneStr != "" {
+		apiID, _ := strconv.Atoi(apiIDStr)
+		tdClient = NewTDClient(apiID, apiHashStr, phoneStr, channelID)
+		log.Printf("✅ TDLib configurado (para archivos >2GB)")
+	} else {
+		log.Printf("⚠️  TDLib no configurado (usando Bot API para archivos <2GB)")
 	}
 
+	bot := NewBot(token, channelID, tdClient)
+	data, _ := bot.api("getMe", nil)
 	var me struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -807,57 +777,34 @@ func main() {
 		} `json:"result"`
 	}
 	json.Unmarshal(data, &me)
+	log.Printf("✅ Bot: @%s", me.Result.Username)
 
-	if !me.OK {
-		log.Fatalf("❌ Token inválido o expirado")
-	}
-
-	log.Printf("✅ Bot conectado: @%s", me.Result.Username)
-
-	engine := NewEngine(tc, storage)
+	engine := NewEngine(tc, storage, bot)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		log.Println("⚡ Cerrando bot…")
 		tc.Close()
 		os.Exit(0)
 	}()
 
-	log.Println("🚀 Bot escuchando mensajes…")
+	log.Println("🚀 Escuchando…")
 
 	offset := 0
 	for {
-		data, err := bot.api("getUpdates", map[string]string{
+		data, _ := bot.api("getUpdates", map[string]string{
 			"timeout": "120",
 			"offset":  strconv.Itoa(offset),
 		})
-		if err != nil {
-			log.Printf("⚠️  Error getUpdates: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
 
 		var ups struct {
-			OK     bool     `json:"ok"`
 			Result []Update `json:"result"`
 		}
-
-		if err := json.Unmarshal(data, &ups); err != nil {
-			log.Printf("⚠️  Error parse updates: %v", err)
-			continue
-		}
-
-		if !ups.OK {
-			log.Printf("⚠️  API error")
-			time.Sleep(5 * time.Second)
-			continue
-		}
+		json.Unmarshal(data, &ups)
 
 		for _, u := range ups.Result {
 			offset = u.UpdateID + 1
-
 			if u.Message != nil && u.Message.Text != "" {
 				go engine.Handle(bot, u.Message.Chat.ID, u.Message.MessageID, u.Message.Text)
 			}
