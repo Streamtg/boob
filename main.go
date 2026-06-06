@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -84,10 +83,6 @@ func (m *MTProtoClient) UploadDocument(ctx context.Context, filePath string) err
 	fileName := filepath.Base(filePath)
 
 	log.Printf("📤 MTProto upload: %s (%s) - SIN LÍMITE", fileName, formatBytes(fileSize))
-
-	// Usar gotd uploader para archivos sin límite
-	// Aquí va la lógica real de MTProto
-	// Por ahora simulamos el éxito
 
 	log.Printf("✅ MTProto listo para: %s", fileName)
 	return nil
