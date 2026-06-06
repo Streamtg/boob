@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -168,8 +167,8 @@ func (b *Bot) answerCallback(queryID string) {
 	b.post("answerCallbackQuery", "application/json", strings.NewReader(string(body)))
 }
 
-func (b *Bot) sendAction(chatID int64, action string) {
-	body, _ := json.Marshal(map[string]interface{}{"chat_id": chatID, "action": action})
+func (b *Bot) sendAction(chatID int64) {
+	body, _ := json.Marshal(map[string]interface{}{"chat_id": chatID, "action": "upload_document"})
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
@@ -432,7 +431,7 @@ func (e *Engine) startDownloadURL(bot *Bot, chatID int64, replyTo int, input str
 	e.tasks[chatID] = &Task{StartedAt: time.Now()}
 	e.mu.Unlock()
 
-	bot.sendAction(chatID, "typing")
+	bot.sendAction(chatID)
 
 	// Stream-fetch the .torrent file to avoid loading it fully into memory
 	mi, fetchErr := e.fetchTorrentFile(input)
