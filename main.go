@@ -22,10 +22,6 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Telegram Bot API
-// ─────────────────────────────────────────────────────────────────────────────
-
 type Bot struct {
 	token     string
 	baseURL   string
@@ -93,10 +89,6 @@ func (b *Bot) getChatID(msgChatID int64) int64 {
 	return msgChatID
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-
 type Update struct {
 	UpdateID int `json:"update_id"`
 	Message  *struct {
@@ -119,34 +111,51 @@ type Update struct {
 	} `json:"callback_query"`
 }
 
+// ── Enviar mensaje con reintentos ──
 func (b *Bot) sendMsg(chatID int64, text string, replyTo int, markdown bool) (int, error) {
 	var parseMode string
 	if markdown {
 		parseMode = "Markdown"
 	}
-	body, _ := json.Marshal(map[string]interface{}{
-		"chat_id":             chatID,
-		"text":                text,
-		"parse_mode":          parseMode,
-		"reply_to_message_id": replyTo,
-	})
-	data, err := b.post("sendMessage", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		log.Printf("[%d] sendMsg error: %v", chatID, err)
-		return 0, err
+
+	for attempt := 0; attempt < 5; attempt++ {
+		body, _ := json.Marshal(map[string]interface{}{
+			"chat_id":             chatID,
+			"text":                text,
+			"parse_mode":          parseMode,
+			"reply_to_message_id": replyTo,
+		})
+		data, err := b.post("sendMessage", "application/json", strings.NewReader(string(body)))
+		if err != nil {
+			log.Printf("[%d] sendMsg error: %v", chatID, err)
+			time.Sleep(time.Duration((attempt+1)*2) * time.Second)
+			continue
+		}
+
+		var r struct {
+			OK     bool   `json:"ok"`
+			Result struct {
+				MessageID int `json:"message_id"`
+			} `json:"result"`
+			ErrorCode int `json:"error_code"`
+		}
+		json.Unmarshal(data, &r)
+
+		if r.ErrorCode == 429 {
+			// Rate limit
+			log.Printf("[%d] Rate limit (429), esperando 25s…", chatID)
+			time.Sleep(25 * time.Second)
+			continue
+		}
+
+		if !r.OK {
+			log.Printf("[%d] sendMsg API error: %s", chatID, string(data))
+			return 0, fmt.Errorf("api error")
+		}
+		return r.Result.MessageID, nil
 	}
-	var r struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			MessageID int `json:"message_id"`
-		} `json:"result"`
-	}
-	json.Unmarshal(data, &r)
-	if !r.OK {
-		log.Printf("[%d] sendMsg API error: %s", chatID, string(data))
-		return 0, fmt.Errorf("api error")
-	}
-	return r.Result.MessageID, nil
+
+	return 0, fmt.Errorf("failed after 5 attempts")
 }
 
 func (b *Bot) editMsg(chatID int64, msgID int, text string) {
@@ -156,10 +165,7 @@ func (b *Bot) editMsg(chatID int64, msgID int, text string) {
 		"text":       text,
 		"parse_mode": "Markdown",
 	})
-	_, err := b.post("editMessageText", "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		log.Printf("[%d] editMsg error: %v", chatID, err)
-	}
+	b.post("editMessageText", "application/json", strings.NewReader(string(body)))
 }
 
 func (b *Bot) answerCallback(queryID string) {
@@ -209,7 +215,7 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 			errChan <- fmt.Errorf("create form file: %w", err)
 			return
 		}
-		buf := make([]byte, 65536)
+		buf := make([]byte, 1024*1024) // 1 MB chunks
 		for {
 			n, readErr := file.Read(buf)
 			if n > 0 {
@@ -440,7 +446,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		}
 	}()
 
-	// Esperar metadata
 	select {
 	case <-t.GotInfo():
 	case <-time.After(120 * time.Second):
@@ -458,7 +463,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	}
 	total := t.Length()
 
-	// ── Recopilar archivos ──────────────────────────────────────────────────
 	var files []FileEntry
 	torrentFiles := t.Files()
 
@@ -470,7 +474,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 			})
 		}
 	} else {
-		// Single-file torrent sin Files()
 		files = []FileEntry{{
 			DisplayPath: name,
 			Length:      total,
@@ -581,10 +584,7 @@ loop:
 	e.uploadFiles(bot, chatID, torrentRef, &taskCopy)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// saveAndUploadFile — guarda en disco y sube a Telegram
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ✅ FIX CRÍTICO: Leer COMPLETAMENTE del torrent con buffer GRANDE
 func (e *Engine) saveAndUploadFile(
 	bot *Bot,
 	chatID int64,
@@ -604,49 +604,32 @@ func (e *Engine) saveAndUploadFile(
 	if err != nil {
 		return false, fmt.Errorf("crear archivo: %w", err)
 	}
+	defer outFile.Close()
 
 	reader := torrentFile.NewReader()
-	reader.SetResponsive()
-	reader.Seek(0, io.SeekStart)
+	defer reader.Close()
 
-	buf := make([]byte, 65536)
-	totalWritten := int64(0)
+	// ✅ FIX: Usar io.CopyBuffer con buffer GRANDE (4 MB)
+	largeBuf := make([]byte, 4*1024*1024)
+	totalWritten, copyErr := io.CopyBuffer(outFile, reader, largeBuf)
 
-	for {
-		n, readErr := reader.Read(buf)
-		if n > 0 {
-			nw, writeErr := outFile.Write(buf[:n])
-			if writeErr != nil {
-				reader.Close()
-				outFile.Close()
-				os.Remove(fullPath)
-				return false, fmt.Errorf("escribir disco: %w", writeErr)
-			}
-			totalWritten += int64(nw)
-		}
-		if readErr != nil {
-			if readErr != io.EOF {
-				reader.Close()
-				outFile.Close()
-				os.Remove(fullPath)
-				return false, fmt.Errorf("leer torrent: %w", readErr)
-			}
-			break
-		}
+	if copyErr != nil {
+		os.Remove(fullPath)
+		return false, fmt.Errorf("copy: %w", copyErr)
 	}
 
-	reader.Close()
-
-	if err := outFile.Close(); err != nil {
+	if err := outFile.Sync(); err != nil {
 		os.Remove(fullPath)
-		return false, fmt.Errorf("cerrar archivo: %w", err)
+		return false, fmt.Errorf("sync: %w", err)
 	}
 
 	// Verificar integridad
 	if totalWritten != fe.Length {
 		os.Remove(fullPath)
+		log.Printf("[%d] ERROR: escrito %d bytes pero esperaba %d",
+			chatID, totalWritten, fe.Length)
 		return false, fmt.Errorf(
-			"archivo incompleto: %s de %s escritos",
+			"incompleto: %s / %s",
 			formatBytes(totalWritten),
 			formatBytes(fe.Length),
 		)
@@ -656,13 +639,12 @@ func (e *Engine) saveAndUploadFile(
 
 	// Subir a Telegram
 	if err := bot.uploadFile(chatID, fullPath, caption); err != nil {
-		// No eliminar si falla la subida (para debug)
 		return false, err
 	}
 
-	// Eliminar solo tras subida exitosa
+	// Eliminar tras subida exitosa
 	if err := os.Remove(fullPath); err != nil {
-		log.Printf("[%d] aviso: no se pudo eliminar %s: %v", chatID, fullPath, err)
+		log.Printf("[%d] aviso: no se pudo eliminar %s", chatID, fullPath)
 	} else {
 		log.Printf("[%d] 🗑 eliminado: %s", chatID, fullPath)
 	}
@@ -670,10 +652,7 @@ func (e *Engine) saveAndUploadFile(
 	return true, nil
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// uploadFiles — sube todos los archivos del torrent
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ✅ FIX: Controlar rate limit con delays entre mensajes
 func (e *Engine) uploadFiles(
 	bot *Bot,
 	chatID int64,
@@ -688,7 +667,6 @@ func (e *Engine) uploadFiles(
 	torrentName := task.Name
 	targetChat := bot.getChatID(chatID)
 
-	// ── Fix: asegurar que tengamos archivos ────────────────────────────────
 	if len(files) == 0 && torrentRef != nil {
 		for _, f := range torrentRef.Files() {
 			files = append(files, FileEntry{
@@ -708,27 +686,24 @@ func (e *Engine) uploadFiles(
 	ok, fail := 0, 0
 
 	bot.sendMsg(targetChat,
-		fmt.Sprintf("📤 *Iniciando subida:* %d archivo(s)\n📁 `%s`",
-			totalFiles, torrentName),
+		fmt.Sprintf("📤 *Iniciando subida:* %d archivo(s)", totalFiles),
 		0, true)
 
+	// ✅ Delay de 2 segundos entre cada archivo para evitar rate limit
 	for i, fe := range files {
 		safeName := filepath.Base(fe.DisplayPath)
 
-		// Límite Telegram: 2 GB
 		const maxSize = int64(2000) * 1024 * 1024
 		if fe.Length > maxSize {
-			log.Printf("[%d] archivo muy grande: %s (%s)", chatID, safeName, formatBytes(fe.Length))
 			bot.sendMsg(targetChat,
-				fmt.Sprintf("⚠️ *Omitido (>2GB):* `%s`\n📊 %s",
-					safeName, formatBytes(fe.Length)),
+				fmt.Sprintf("⚠️ *Omitido (>2GB):* `%s`", safeName),
 				0, true)
 			fail++
+			time.Sleep(2 * time.Second) // ← Delay
 			continue
 		}
 
-		caption := fmt.Sprintf("[%d/%d] %s — %s",
-			i+1, totalFiles, torrentName, safeName)
+		caption := fmt.Sprintf("[%d/%d] %s", i+1, totalFiles, safeName)
 
 		log.Printf("[%d] 📤 [%d/%d] %s (%s)",
 			chatID, i+1, totalFiles, safeName, formatBytes(fe.Length))
@@ -736,22 +711,16 @@ func (e *Engine) uploadFiles(
 		bot.sendAction(targetChat, "upload_document")
 
 		progMsg, _ := bot.sendMsg(targetChat,
-			fmt.Sprintf("📤 *Subiendo* `%s`\n📦 %d/%d • %s",
-				safeName, i+1, totalFiles, formatBytes(fe.Length)),
+			fmt.Sprintf("📤 *Subiendo* [%d/%d] `%s`",
+				i+1, totalFiles, safeName),
 			0, true)
 
-		// ── Buscar archivo en torrent ──────────────────────────────────────
 		var torrentFile *torrent.File
 		if torrentRef != nil {
 			torrentFiles := torrentRef.Files()
-			switch len(torrentFiles) {
-			case 0:
-				// Sin archivos — no se puede subir
-			case 1:
-				// Single-file: usar directamente
+			if len(torrentFiles) == 1 {
 				torrentFile = torrentFiles[0]
-			default:
-				// Multi-file: buscar por DisplayPath
+			} else {
 				for _, f := range torrentFiles {
 					if f.DisplayPath() == fe.DisplayPath {
 						torrentFile = f
@@ -762,15 +731,11 @@ func (e *Engine) uploadFiles(
 		}
 
 		if torrentFile == nil {
-			log.Printf("[%d] archivo no encontrado en torrent: %s", chatID, safeName)
 			bot.sendMsg(targetChat,
-				fmt.Sprintf("❌ *No encontrado en torrent:* `%s`", safeName),
+				fmt.Sprintf("❌ *No encontrado:* `%s`", safeName),
 				0, true)
-			if progMsg > 0 {
-				bot.editMsg(targetChat, progMsg,
-					fmt.Sprintf("❌ *No encontrado:* `%s`", safeName))
-			}
 			fail++
+			time.Sleep(2 * time.Second) // ← Delay
 			continue
 		}
 
@@ -781,34 +746,28 @@ func (e *Engine) uploadFiles(
 			ok++
 			if progMsg > 0 {
 				bot.editMsg(targetChat, progMsg,
-					fmt.Sprintf("✅ *Subido:* `%s` (%d/%d)",
-						safeName, i+1, totalFiles))
+					fmt.Sprintf("✅ *Subido* [%d/%d] `%s`",
+						i+1, totalFiles, safeName))
 			}
 		} else {
-			log.Printf("[%d] fallo subida: %v", chatID, uploadErr)
 			bot.sendMsg(targetChat,
-				fmt.Sprintf("❌ *Falló:* `%s`\n`%v`", safeName, uploadErr),
+				fmt.Sprintf("❌ *Falló:* `%s` — %v", safeName, uploadErr),
 				0, true)
-			if progMsg > 0 {
-				bot.editMsg(targetChat, progMsg,
-					fmt.Sprintf("❌ *Falló:* `%s`", safeName))
-			}
 			fail++
 		}
 
-		time.Sleep(500 * time.Millisecond)
+		// ✅ Delay entre archivos
+		time.Sleep(2 * time.Second)
 	}
 
 	// Resumen final
 	if fail > 0 {
 		bot.sendMsg(targetChat,
-			fmt.Sprintf("🎉 *Listo!*\n✅ %d subidos\n❌ %d fallaron\n📁 `%s`",
-				ok, fail, torrentName),
+			fmt.Sprintf("🎉 *Listo!* ✅ %d ❌ %d", ok, fail),
 			0, true)
 	} else {
 		bot.sendMsg(targetChat,
-			fmt.Sprintf("🎉 *¡Todo subido!*\n✅ %d archivo(s)\n📁 `%s`",
-				ok, torrentName),
+			fmt.Sprintf("🎉 *¡Éxito!* ✅ %d archivos", ok),
 			0, true)
 	}
 }
@@ -855,153 +814,81 @@ func formatBytes(n int64) string {
 
 const helpText = `🤖 *TeleTorrent Bot*
 
-Envíame un magnet link o URL .torrent y lo descargo y subo al canal.
+Envíame un magnet link o URL .torrent
 
 *Comandos:*
-/start /help — este mensaje
-/status      — estado de descarga activa
-/cancel      — cancelar descarga actual
+/start /help — ayuda
+/status      — estado
+/cancel      — cancelar
 
-*Formatos soportados:*
-• Magnet links _(magnet:?xt=…)_
-• URL .torrent _(https://…/archivo.torrent)_
-
-*Límites:*
-• Máximo 2 GB por archivo (límite de Telegram)`
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Main
-// ─────────────────────────────────────────────────────────────────────────────
+*Soportado:*
+• Magnets
+• URLs .torrent`
 
 func main() {
 	var token, storage, channelStr string
-	flag.StringVar(&token, "token", "", "Bot token de @BotFather")
-	flag.StringVar(&storage, "storage", "./downloads", "Directorio de descargas")
-	flag.StringVar(&channelStr, "channel", "", "ID del canal destino (ej: -1003213143951)")
+	flag.StringVar(&token, "token", "", "Bot token")
+	flag.StringVar(&storage, "storage", "./downloads", "Carpeta")
+	flag.StringVar(&channelStr, "channel", "", "ID canal")
 	flag.Parse()
 
 	if token == "" {
-		fmt.Println("❌  Uso: ./tele-torrent-bot -token TOKEN [-channel ID_CANAL]")
-		fmt.Println("   Obtén tu token en https://t.me/BotFather")
+		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID]")
 		os.Exit(1)
 	}
 
 	var channelID int64
 	if channelStr != "" {
-		var err error
-		channelID, err = strconv.ParseInt(channelStr, 10, 64)
-		if err != nil {
-			log.Fatalf("❌  ID de canal inválido: %s", channelStr)
-		}
-		log.Printf("📢 Canal destino: %s", channelStr)
+		channelID, _ = strconv.ParseInt(channelStr, 10, 64)
+		log.Printf("📢 Canal: %s", channelStr)
 	}
 
-	if err := os.MkdirAll(storage, 0755); err != nil {
-		log.Fatalf("❌  No se puede crear directorio: %v", err)
-	}
-	log.Printf("📁 Directorio de descargas: %s", storage)
+	os.MkdirAll(storage, 0755)
 
-	// ── Configurar cliente torrent ─────────────────────────────────────────
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = storage
-	cfg.NoUpload = false
 	cfg.Seed = true
-	cfg.SetListenAddr("0.0.0.0:0")
-	cfg.DisableIPv6 = true
-	cfg.DisableIPv4 = false
-	cfg.NoDHT = false
-	cfg.DisableTCP = false
 
-	tc, err := torrent.NewClient(cfg)
-	if err != nil {
-		log.Fatalf("❌  Error cliente torrent: %v", err)
-	}
+	tc, _ := torrent.NewClient(cfg)
 	defer tc.Close()
-	log.Printf("✅  Cliente torrent listo")
 
-	// ── Conectar bot ───────────────────────────────────────────────────────
 	bot := NewBot(token, channelID)
-	data, err := bot.api("getMe", nil)
-	if err != nil {
-		log.Fatalf("❌  Error auth Telegram: %v", err)
-	}
+	data, _ := bot.api("getMe", nil)
 	var me struct {
-		OK     bool `json:"ok"`
 		Result struct {
 			Username string `json:"username"`
-			ID       int64  `json:"id"`
 		} `json:"result"`
 	}
 	json.Unmarshal(data, &me)
-	if !me.OK {
-		log.Fatalf("❌  Token inválido")
-	}
-	log.Printf("✅  Bot conectado: @%s (ID: %d)", me.Result.Username, me.Result.ID)
+	log.Printf("✅ Bot: @%s", me.Result.Username)
 
 	engine := NewEngine(tc, storage)
 
-	// ── Señales de sistema ─────────────────────────────────────────────────
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		log.Println("⚡ Cerrando bot…")
-		tc.Close()
+		log.Println("⚡ Cerrando…")
 		os.Exit(0)
 	}()
 
-	log.Println("🚀 Bot escuchando mensajes…")
-
-	// ── Loop principal ─────────────────────────────────────────────────────
+	log.Println("🚀 Escuchando…")
 	offset := 0
 	for {
-		data, err := bot.api("getUpdates", map[string]string{
-			"timeout":         "120",
-			"offset":          strconv.Itoa(offset),
-			"allowed_updates": `["message","callback_query"]`,
+		data, _ := bot.api("getUpdates", map[string]string{
+			"timeout": "120",
+			"offset":  strconv.Itoa(offset),
 		})
-		if err != nil {
-			log.Printf("⚠️  getUpdates: %v — reintentando en 5s", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
 		var ups struct {
-			OK     bool     `json:"ok"`
 			Result []Update `json:"result"`
 		}
-		if err := json.Unmarshal(data, &ups); err != nil {
-			log.Printf("⚠️  parse updates: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		if !ups.OK {
-			log.Printf("⚠️  API devolvió !ok: %s", string(data))
-			time.Sleep(5 * time.Second)
-			continue
-		}
+		json.Unmarshal(data, &ups)
 
 		for _, u := range ups.Result {
 			offset = u.UpdateID + 1
 
-			if u.Message != nil {
-				chatID := u.Message.Chat.ID
-				text := u.Message.Text
-				if text == "" {
-					text = u.Message.Caption
-				}
-				if text == "" {
-					continue
-				}
-				go engine.Handle(bot, chatID, u.Message.MessageID, text)
-
-			} else if u.CallbackQuery != nil {
-				chatID := u.CallbackQuery.Message.Chat.ID
-				bot.answerCallback(u.CallbackQuery.ID)
-				go engine.Handle(bot, chatID,
-					u.CallbackQuery.Message.MessageID,
-					u.CallbackQuery.Data)
+			if u.Message != nil && u.Message.Text != "" {
+				go engine.Handle(bot, u.Message.Chat.ID, u.Message.MessageID, u.Message.Text)
 			}
 		}
 	}
