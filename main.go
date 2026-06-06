@@ -37,7 +37,6 @@ func NewBot(token string) *Bot {
 	return &Bot{
 		token:   token,
 		baseURL: "https://api.telegram.org/bot" + token,
-		// Separate HTTP client for long-polling (no timeout)
 		client: &http.Client{
 			Timeout: 0,
 			Transport: &http.Transport{
@@ -52,7 +51,7 @@ func NewBot(token string) *Bot {
 // uploadClient returns a fresh HTTP client for file uploads (not shared with polling)
 func uploadClient() *http.Client {
 	return &http.Client{
-		Timeout: 5 * time.Minute, // 5 min per file upload
+		Timeout: 10 * time.Minute,
 		Transport: &http.Transport{
 			MaxIdleConns:        10,
 			MaxIdleConnsPerHost: 10,
@@ -164,7 +163,7 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-// uploadFile uploads a local file to Telegram using a dedicated client
+// uploadFile uploads a local file to Telegram
 func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -175,6 +174,9 @@ func (b *Bot) uploadFile(chatID int64, filePath string, caption string) error {
 	fi, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat file: %w", err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("file is empty")
 	}
 
 	filename := filepath.Base(filePath)
@@ -244,6 +246,7 @@ type Task struct {
 	TotalBytes int64
 	Error      string
 	StartedAt  time.Time
+	Torrent    *torrent.Torrent // keep reference to torrent for file reading
 }
 
 type FileEntry struct {
@@ -426,6 +429,7 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	e.tasks[chatID].Name = name
 	e.tasks[chatID].Files = files
 	e.tasks[chatID].TotalBytes = total
+	e.tasks[chatID].Torrent = t
 	e.mu.Unlock()
 
 	t.DownloadAll()
@@ -500,22 +504,28 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 		}
 	}
 
-	// Download complete — copy task data before releasing the lock
+	// Wait a moment to ensure all pieces are fully flushed to disk
+	log.Printf("[%d] download complete, waiting for pieces to flush...", chatID)
+	time.Sleep(3 * time.Second)
+
+	// Copy task data before modifying the map
 	e.mu.Lock()
 	taskCopy := *e.tasks[chatID]
 	taskCopy.Files = make([]FileEntry, len(e.tasks[chatID].Files))
 	copy(taskCopy.Files, e.tasks[chatID].Files)
+	// Keep torrent reference for file reading
+	torrentRef := e.tasks[chatID].Torrent
 	e.tasks[chatID].Done = true
 	e.tasks[chatID].Progress = 100
 	e.mu.Unlock()
 
 	bot.sendMsg(chatID, fmt.Sprintf("✅ *Download complete:* `%s`\n⏳ *Uploading to Telegram…*", name), 0, true)
 
-	// Upload files — this runs AFTER download loop exits and torrent may still be alive
-	e.uploadFiles(bot, chatID, &taskCopy)
+	// Upload files (pass torrent reference for reading if needed)
+	e.uploadFiles(bot, chatID, torrentRef, &taskCopy)
 }
 
-func (e *Engine) uploadFiles(bot *Bot, chatID int64, task *Task) {
+func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent, task *Task) {
 	files := task.Files
 	torrentName := task.Name
 
@@ -554,48 +564,82 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, task *Task) {
 				safeName, i+1, totalFiles, formatBytes(fe.Length)),
 			0, true)
 
-		// Try reading from filesystem
-		fullPath := filepath.Join(e.storage, fe.DisplayPath)
-		
-		// If file doesn't exist on disk, try to read from torrent reader and save it
-		if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-			log.Printf("[%d] file not on disk, reading from torrent: %s", chatID, safeName)
-			var torrentFile *torrent.File
-			for _, f := range e.tc.Torrents() {
-				for _, tf := range f.Files() {
-					if tf.DisplayPath() == fe.DisplayPath {
-						torrentFile = tf
-						break
-					}
+		// Find the file in the torrent
+		var torrentFile *torrent.File
+		if torrentRef != nil {
+			for _, f := range torrentRef.Files() {
+				if f.DisplayPath() == fe.DisplayPath {
+					torrentFile = f
+					break
 				}
 			}
+		}
+
+		var uploadedPath string
+		var uploadErr error
+
+		// Try method 1: Read from filesystem
+		fullPath := filepath.Join(e.storage, fe.DisplayPath)
+		if fi, err := os.Stat(fullPath); err == nil && !fi.IsDir() && fi.Size() > 0 {
+			log.Printf("[%d] reading from disk: %s", chatID, fullPath)
+			uploadErr = bot.uploadFile(chatID, fullPath, caption)
+			if uploadErr == nil {
+				uploadedPath = fullPath
+			}
+		} else {
+			log.Printf("[%d] not on disk (or empty), trying torrent reader: %s", chatID, safeName)
+			// Try method 2: Read from torrent reader and save temp file
 			if torrentFile != nil {
 				reader := torrentFile.NewReader()
 				data, readErr := io.ReadAll(reader)
 				reader.Close()
 				if readErr == nil && len(data) > 0 {
-					// Save to disk
-					dir := filepath.Dir(fullPath)
-					os.MkdirAll(dir, 0755)
-					os.WriteFile(fullPath, data, 0644)
-					log.Printf("[%d] saved to disk: %s", chatID, fullPath)
-				} else if readErr != nil {
-					log.Printf("[%d] torrent read error: %v", chatID, readErr)
+					// Save to temp location then upload
+					tmpDir := filepath.Join(e.storage, "__upload_tmp")
+					os.MkdirAll(tmpDir, 0755)
+					tmpFile := filepath.Join(tmpDir, safeName)
+					if writeErr := os.WriteFile(tmpFile, data, 0644); writeErr == nil {
+						log.Printf("[%d] saved temp file: %s", chatID, tmpFile)
+						uploadErr = bot.uploadFile(chatID, tmpFile, caption)
+						if uploadErr == nil {
+							uploadedPath = tmpFile
+						}
+					} else {
+						uploadErr = fmt.Errorf("write temp file: %w", writeErr)
+					}
+				} else {
+					uploadErr = fmt.Errorf("torrent read: %v", readErr)
 				}
+			} else {
+				uploadErr = fmt.Errorf("file not found in torrent: %s", safeName)
 			}
 		}
 
-		err := bot.uploadFile(chatID, fullPath, caption)
-
-		if err != nil {
-			log.Printf("[%d] upload failed %s: %v", chatID, safeName, err)
+		// Upload result
+		if uploadErr != nil {
+			log.Printf("[%d] upload failed %s: %v", chatID, safeName, uploadErr)
 			bot.sendMsg(chatID,
-				fmt.Sprintf("❌ *Upload failed:* `%s` — %v", safeName, err), 0, true)
+				fmt.Sprintf("❌ *Upload failed:* `%s` — %v", safeName, uploadErr), 0, true)
 			fail++
 		} else {
 			ok++
 			bot.sendMsg(chatID,
 				fmt.Sprintf("✅ *Uploaded:* `%s` (%d/%d)", safeName, i+1, totalFiles), 0, true)
+
+			// DELETE the file from disk after successful upload
+			if uploadedPath != "" {
+				if err := os.Remove(uploadedPath); err != nil {
+					log.Printf("[%d] failed to delete %s: %v", chatID, uploadedPath, err)
+				} else {
+					log.Printf("[%d] 🗑 deleted: %s", chatID, uploadedPath)
+				}
+				// Also try to remove the original path if different
+				if uploadedPath != fullPath {
+					if err := os.Remove(fullPath); err != nil {
+						// Ignore error, file might not exist there
+					}
+				}
+			}
 		}
 
 		if progMsg > 0 {
@@ -605,6 +649,10 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, task *Task) {
 
 		time.Sleep(1 * time.Second)
 	}
+
+	// Clean up any remaining __upload_tmp directory
+	tmpDir := filepath.Join(e.storage, "__upload_tmp")
+	os.RemoveAll(tmpDir)
 
 	if fail > 0 {
 		bot.sendMsg(chatID,
@@ -697,7 +745,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	os.MkdirAll(storage, 0755)
+	// Create download folder
+	if err := os.MkdirAll(storage, 0755); err != nil {
+		log.Fatalf("❌  Cannot create storage directory: %v", err)
+	}
+	log.Printf("📁 Storage directory: %s", storage)
 
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = storage
@@ -713,7 +765,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌  Torrent client error: %v", err)
 	}
-	// Don't defer tc.Close() here — we close it on signal
 	log.Printf("✅  Torrent client ready. Storage: %s", storage)
 
 	bot := NewBot(token)
