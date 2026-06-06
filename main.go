@@ -158,7 +158,6 @@ func (b *Bot) sendAction(chatID int64, action string) {
 	b.post("sendChatAction", "application/json", strings.NewReader(string(body)))
 }
 
-// ✅ Subir archivo sin límite de tamaño
 func (b *Bot) uploadFileLarge(chatID int64, filePath string, caption string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -495,8 +494,6 @@ func (e *Engine) downloadLoop(bot *Bot, chatID int64, replyTo int, t *torrent.To
 	defer ticker.Stop()
 
 	var lastBytes int64
-	// ✅ FIX 1: Usar lastTime
-	lastTime := time.Now()
 
 loop:
 	for {
@@ -528,7 +525,6 @@ loop:
 
 			if completed > lastBytes {
 				lastBytes = completed
-				lastTime = time.Now()
 			}
 
 			bar := strings.Repeat("█", int(pct)/5) +
@@ -690,7 +686,6 @@ func (e *Engine) uploadFiles(bot *Bot, chatID int64, torrentRef *torrent.Torrent
 			continue
 		}
 
-		// ✅ FIX 2: Capturar ambos valores (bool, error)
 		success, err := e.saveAndUploadFile(bot, chatID, torrentFile, fe, safeName)
 		if success {
 			ok++
@@ -750,28 +745,43 @@ const helpText = `🤖 *TeleTorrent Bot*
 Envíame un magnet o URL .torrent
 
 *Comandos:*
-/start /help
-/status
-/cancel`
+/start /help — ayuda
+/status — estado
+/cancel — cancelar
+
+*Características:*
+✅ Descarga de torrents
+✅ Subida completa sin división
+✅ Soporte hasta 2GB por archivo
+✅ Reintentos automáticos`
 
 func main() {
 	var token, storage, channelStr string
 	flag.StringVar(&token, "token", "", "Bot token")
-	flag.StringVar(&storage, "storage", "./downloads", "Carpeta")
-	flag.StringVar(&channelStr, "channel", "", "ID canal")
+	flag.StringVar(&storage, "storage", "./downloads", "Carpeta de descargas")
+	flag.StringVar(&channelStr, "channel", "", "ID del canal destino")
 	flag.Parse()
 
 	if token == "" {
-		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID]")
+		fmt.Println("❌ Uso: ./bot -token TOKEN [-channel ID_CANAL]")
+		fmt.Println("\n📌 Obtén tu token en: https://t.me/BotFather")
 		os.Exit(1)
 	}
 
 	var channelID int64
 	if channelStr != "" {
-		channelID, _ = strconv.ParseInt(channelStr, 10, 64)
+		var err error
+		channelID, err = strconv.ParseInt(channelStr, 10, 64)
+		if err != nil {
+			log.Fatalf("❌ ID de canal inválido: %s", channelStr)
+		}
+		log.Printf("📢 Canal destino: %d", channelID)
 	}
 
-	os.MkdirAll(storage, 0755)
+	if err := os.MkdirAll(storage, 0755); err != nil {
+		log.Fatalf("❌ No se puede crear directorio: %v", err)
+	}
+	log.Printf("📁 Directorio: %s", storage)
 
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = storage
@@ -780,12 +790,16 @@ func main() {
 
 	tc, err := torrent.NewClient(cfg)
 	if err != nil {
-		log.Fatalf("❌ Error: %v", err)
+		log.Fatalf("❌ Error torrent: %v", err)
 	}
 	defer tc.Close()
 
 	bot := NewBot(token, channelID)
-	data, _ := bot.api("getMe", nil)
+	data, err := bot.api("getMe", nil)
+	if err != nil {
+		log.Fatalf("❌ Error autenticación: %v", err)
+	}
+
 	var me struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -793,7 +807,12 @@ func main() {
 		} `json:"result"`
 	}
 	json.Unmarshal(data, &me)
-	log.Printf("✅ Bot: @%s", me.Result.Username)
+
+	if !me.OK {
+		log.Fatalf("❌ Token inválido o expirado")
+	}
+
+	log.Printf("✅ Bot conectado: @%s", me.Result.Username)
 
 	engine := NewEngine(tc, storage)
 
@@ -801,24 +820,44 @@ func main() {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
+		log.Println("⚡ Cerrando bot…")
 		tc.Close()
 		os.Exit(0)
 	}()
 
-	log.Println("🚀 Escuchando…")
+	log.Println("🚀 Bot escuchando mensajes…")
+
 	offset := 0
 	for {
-		data, _ := bot.api("getUpdates", map[string]string{
+		data, err := bot.api("getUpdates", map[string]string{
 			"timeout": "120",
 			"offset":  strconv.Itoa(offset),
 		})
+		if err != nil {
+			log.Printf("⚠️  Error getUpdates: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
 		var ups struct {
+			OK     bool     `json:"ok"`
 			Result []Update `json:"result"`
 		}
-		json.Unmarshal(data, &ups)
+
+		if err := json.Unmarshal(data, &ups); err != nil {
+			log.Printf("⚠️  Error parse updates: %v", err)
+			continue
+		}
+
+		if !ups.OK {
+			log.Printf("⚠️  API error")
+			time.Sleep(5 * time.Second)
+			continue
+		}
 
 		for _, u := range ups.Result {
 			offset = u.UpdateID + 1
+
 			if u.Message != nil && u.Message.Text != "" {
 				go engine.Handle(bot, u.Message.Chat.ID, u.Message.MessageID, u.Message.Text)
 			}
