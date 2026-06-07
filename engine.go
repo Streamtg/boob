@@ -102,7 +102,7 @@ func (e *Engine) cmdHelp(bot *tgbotapi.BotAPI, chatID int64, replyTo int) {
 			"*Supported:*\n"+
 			"`magnet:?xt=urn:btih:...`\n"+
 			"`https://.../file.torrent`\n\n"+
-			"One download at a time per chat. 90s stall timeout.")
+			"One download at a time. 90s stall timeout.")
 }
 
 func (e *Engine) cmdStatus(bot *tgbotapi.BotAPI, chatID int64, replyTo int) {
