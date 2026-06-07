@@ -1,4 +1,4 @@
-module teletorrentbot
+module teletorrent-bot
 
 go 1.24
 
