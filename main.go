@@ -20,20 +20,14 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constantes globales
-// ─────────────────────────────────────────────────────────────────────────────
 const (
-	ProgressUpdateInterval = 2 * time.Second
-	StallTimeout           = 90 * time.Second
-	UploadPause            = 500 * time.Millisecond
-	MaxRetries             = 5
-	RetryDelay             = 2 * time.Second
+	progressInterval = 2 * time.Second
+	stallTimeout     = 90 * time.Second
+	uploadPause      = 500 * time.Millisecond
+	maxRetries       = 5
+	retryDelay       = 2 * time.Second
 )
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Config — parámetros de línea de comandos
-// ─────────────────────────────────────────────────────────────────────────────
 type Config struct {
 	Token     string
 	ChannelID int64
@@ -42,38 +36,27 @@ type Config struct {
 }
 
 func parseFlags() Config {
-	var (
-		token   = flag.String("token", "", "Telegram Bot Token (requerido)")
-		channel = flag.String("channel", "", "Telegram Channel/Group ID (opcional)")
-		storage = flag.String("storage", "./downloads", "Directorio de descargas")
-		port    = flag.Int("port", 0, "Puerto DHT (0 = aleatorio)")
-	)
+	token := flag.String("token", "", "Telegram Bot Token (required)")
+	channel := flag.String("channel", "", "Telegram Channel ID (optional)")
+	storage := flag.String("storage", "./downloads", "Download directory")
+	port := flag.Int("port", 0, "DHT port (0 = random)")
 	flag.Parse()
 
 	if *token == "" {
-		log.Fatal("Token requerido. Usa: -token \"TU_TOKEN\"")
+		log.Fatal("ERROR: -token is required")
 	}
 
-	cfg := Config{
-		Token:   *token,
-		Storage: *storage,
-		Port:    *port,
-	}
-
+	cfg := Config{Token: *token, Storage: *storage, Port: *port}
 	if *channel != "" {
-		chID, err := strconv.ParseInt(*channel, 10, 64)
+		id, err := strconv.ParseInt(*channel, 10, 64)
 		if err != nil {
-			log.Fatalf("Channel ID invalido: %v", err)
+			log.Fatalf("Invalid channel ID: %v", err)
 		}
-		cfg.ChannelID = chID
+		cfg.ChannelID = id
 	}
-
 	return cfg
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// TaskStatus — seguimiento de descarga por chat
-// ─────────────────────────────────────────────────────────────────────────────
 type TaskStatus struct {
 	InfoHash   string
 	Name       string
@@ -87,9 +70,6 @@ type TaskStatus struct {
 	mu         sync.RWMutex
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Engine — motor de descarga torrent + control de Telegram
-// ─────────────────────────────────────────────────────────────────────────────
 type Engine struct {
 	client   *torrent.Client
 	storage  string
@@ -98,42 +78,33 @@ type Engine struct {
 	magnetRe *regexp.Regexp
 }
 
-// NewEngine — crea el cliente torrent y el motor
 func NewEngine(cfg Config) (*Engine, error) {
 	if err := os.MkdirAll(cfg.Storage, 0755); err != nil {
-		return nil, fmt.Errorf("creando storage: %w", err)
+		return nil, fmt.Errorf("mkdir storage: %w", err)
 	}
 
-	torrentCfg := torrent.NewDefaultClientConfig()
-	torrentCfg.DataDir = cfg.Storage
-	torrentCfg.Seed = true
-	torrentCfg.Debug = false
-	torrentCfg.ListenPort = cfg.Port
-	torrentCfg.NoDHT = false
+	tc := torrent.NewDefaultClientConfig()
+	tc.DataDir = cfg.Storage
+	tc.Seed = true
+	tc.Debug = false
+	tc.ListenPort = cfg.Port
+	tc.NoDHT = false
 
-	client, err := torrent.NewClient(torrentCfg)
+	client, err := torrent.NewClient(tc)
 	if err != nil {
-		return nil, fmt.Errorf("creando cliente torrent: %w", err)
+		return nil, fmt.Errorf("torrent client: %w", err)
 	}
-
-	magnetRe := regexp.MustCompile(`[&?].*$`)
 
 	return &Engine{
 		client:   client,
 		storage:  cfg.Storage,
 		tasks:    make(map[int64]*TaskStatus),
-		magnetRe: magnetRe,
+		magnetRe: regexp.MustCompile(`[&?].*$`),
 	}, nil
 }
 
-// Close — cierra el cliente torrent
-func (e *Engine) Close() {
-	e.client.Close()
-}
+func (e *Engine) Close() { e.client.Close() }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// HandleMessage — rutea los mensajes entrantes
-// ─────────────────────────────────────────────────────────────────────────────
 func (e *Engine) HandleMessage(bot *tgbotapi.BotAPI, chatID int64, replyTo int, text string) {
 	switch {
 	case text == "/start" || text == "/help":
@@ -147,70 +118,55 @@ func (e *Engine) HandleMessage(bot *tgbotapi.BotAPI, chatID int64, replyTo int, 
 	case isTorrentURL(text):
 		e.startDownload(bot, chatID, replyTo, text)
 	default:
-		e.sendMarkdown(bot, chatID, replyTo,
-			"*No reconozco ese comando.*\nEnvia /help para ver los comandos disponibles.")
+		e.send(bot, chatID, replyTo, "*Unknown command.* Use /help")
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Comandos: /help, /status, /cancel
-// ─────────────────────────────────────────────────────────────────────────────
+// ---- commands ----
+
 func (e *Engine) cmdHelp(bot *tgbotapi.BotAPI, chatID int64, replyTo int) {
-	help := "*TeleTorrent Bot v2.0*\n\n" +
-		"Enviame un *magnet link* o una *URL directa a un .torrent* " +
-		"y yo lo descargare y te enviare los archivos de vuelta.\n\n" +
-		"*Comandos:*\n" +
-		"- /start o /help — Muestra este mensaje\n" +
-		"- /status — Estado de la descarga actual\n" +
-		"- /cancel — Cancela la descarga actual\n\n" +
-		"*Soportado:*\n" +
-		"- Magnet links: `magnet:?xt=urn:btih:...`\n" +
-		"- URLs directas .torrent: `https://ejemplo.com/archivo.torrent`\n\n" +
-		"*Notas:*\n" +
-		"- Solo una descarga activa por chat.\n" +
-		"- Timeout por falta de peers: 90 segundos."
-	e.sendMarkdown(bot, chatID, replyTo, help)
+	e.send(bot, chatID, replyTo,
+		"*TeleTorrent Bot*\n\n"+
+			"Send me a magnet link or .torrent URL and I'll download and send files back.\n\n"+
+			"*Commands:*\n"+
+			"/start /help - Show this\n"+
+			"/status - Download progress\n"+
+			"/cancel - Cancel current download\n\n"+
+			"*Supported:*\n"+
+			"`magnet:?xt=urn:btih:...`\n"+
+			"`https://.../file.torrent`\n\n"+
+			"One download at a time per chat. 90s stall timeout.")
 }
 
 func (e *Engine) cmdStatus(bot *tgbotapi.BotAPI, chatID int64, replyTo int) {
 	e.mu.RLock()
 	task, ok := e.tasks[chatID]
 	e.mu.RUnlock()
-
 	if !ok {
-		e.sendMarkdown(bot, chatID, replyTo, "*No hay descargas activas.*")
+		e.send(bot, chatID, replyTo, "*No active download.*")
 		return
 	}
 
 	task.mu.RLock()
-	pct := task.Progress
-	name := task.Name
-	errMsg := task.Error
-	started := task.StartedAt
-	done := task.Done
-	downloaded := task.Downloaded
-	total := task.TotalBytes
+	pct, name, errMsg := task.Progress, task.Name, task.Error
+	started, done := task.StartedAt, task.Done
+	down, total := task.Downloaded, task.TotalBytes
 	task.mu.RUnlock()
 
 	switch {
 	case errMsg != "":
-		e.sendMarkdown(bot, chatID, replyTo,
-			fmt.Sprintf("*Error:* `%s`", errMsg))
+		e.send(bot, chatID, replyTo, fmt.Sprintf("*Error:* `%s`", errMsg))
 	case done:
-		e.sendMarkdown(bot, chatID, replyTo,
-			fmt.Sprintf("*Completado:* `%s`", name))
+		e.send(bot, chatID, replyTo, fmt.Sprintf("*Completed:* `%s`", name))
 	default:
 		elapsed := time.Since(started).Round(time.Second)
 		speed := ""
-		if elapsed.Seconds() > 4 && downloaded > 0 {
-			bps := int64(float64(downloaded) / elapsed.Seconds())
-			speed = " | " + formatBytes(bps) + "/s"
+		if elapsed.Seconds() > 4 && down > 0 {
+			speed = " | " + formatBytes(int64(float64(down)/elapsed.Seconds())) + "/s"
 		}
-		e.sendMarkdown(bot, chatID, replyTo,
-			fmt.Sprintf("*Descargando:* `%s`\n`%.1f%%` | %s / %s%s\n%s",
-				name, pct,
-				formatBytes(downloaded), formatBytes(total),
-				speed, elapsed))
+		e.send(bot, chatID, replyTo,
+			fmt.Sprintf("*Downloading:* `%s`\n`%.1f%%` | %s / %s%s\n%s",
+				name, pct, formatBytes(down), formatBytes(total), speed, elapsed))
 	}
 }
 
@@ -218,36 +174,32 @@ func (e *Engine) cmdCancel(bot *tgbotapi.BotAPI, chatID int64, replyTo int) {
 	e.mu.Lock()
 	if _, ok := e.tasks[chatID]; !ok {
 		e.mu.Unlock()
-		e.sendMarkdown(bot, chatID, replyTo, "*No hay nada que cancelar.*")
+		e.send(bot, chatID, replyTo, "*Nothing to cancel.*")
 		return
 	}
 	delete(e.tasks, chatID)
 	e.mu.Unlock()
-	e.sendMarkdown(bot, chatID, replyTo, "*Descarga cancelada.*")
+	e.send(bot, chatID, replyTo, "*Download cancelled.*")
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// startDownload — inicia una descarga desde magnet o URL .torrent
-// ─────────────────────────────────────────────────────────────────────────────
+// ---- download ----
+
 func (e *Engine) startDownload(bot *tgbotapi.BotAPI, chatID int64, replyTo int, input string) {
-	// Verificar si ya hay una descarga activa
 	e.mu.Lock()
 	if _, active := e.tasks[chatID]; active {
 		e.mu.Unlock()
-		e.sendMarkdown(bot, chatID, replyTo, "*Ya hay una descarga en progreso.* Usa /cancel primero.")
+		e.send(bot, chatID, replyTo, "*Download already in progress.* Use /cancel first.")
 		return
 	}
 	e.tasks[chatID] = &TaskStatus{StartedAt: time.Now()}
 	e.mu.Unlock()
 
-	// Mensaje de estado inicial
-	statusMsg := tgbotapi.NewMessage(chatID, "*Iniciando descarga...*")
-	statusMsg.ReplyToMessageID = replyTo
-	statusMsg.ParseMode = "Markdown"
-	sent, err := bot.Send(statusMsg)
+	msg := tgbotapi.NewMessage(chatID, "*Starting download...*")
+	msg.ReplyToMessageID = replyTo
+	msg.ParseMode = "Markdown"
+	sent, err := bot.Send(msg)
 	if err != nil {
-		log.Printf("[%d] error enviando mensaje inicial: %v", chatID, err)
-		e.failTask(chatID, "Error interno")
+		log.Printf("[%d] send error: %v", chatID, err)
 		e.mu.Lock()
 		delete(e.tasks, chatID)
 		e.mu.Unlock()
@@ -259,12 +211,10 @@ func (e *Engine) startDownload(bot *tgbotapi.BotAPI, chatID int64, replyTo int, 
 	var addErr error
 
 	if strings.HasPrefix(strings.TrimSpace(input), "magnet:?") {
-		log.Printf("[%d] Agregando magnet link", chatID)
-		// Limpiar parametros extra
+		log.Printf("[%d] magnet: %s", chatID, input[:60])
 		clean := e.magnetRe.ReplaceAllString(strings.TrimSpace(input), "")
 		if !strings.HasPrefix(clean, "magnet:?xt=") {
-			e.failTask(chatID, "Magnet link invalido")
-			e.editMarkdown(bot, statusMsgID, chatID, "*Magnet link invalido.*")
+			e.edit(bot, statusMsgID, chatID, "*Invalid magnet link.*")
 			e.mu.Lock()
 			delete(e.tasks, chatID)
 			e.mu.Unlock()
@@ -272,14 +222,11 @@ func (e *Engine) startDownload(bot *tgbotapi.BotAPI, chatID int64, replyTo int, 
 		}
 		t, addErr = e.client.AddMagnet(clean)
 	} else {
-		log.Printf("[%d] Descargando .torrent URL: %s", chatID, input)
+		log.Printf("[%d] torrent URL: %s", chatID, input)
 		bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping))
-
 		data, fetchErr := fetchURL(input)
 		if fetchErr != nil {
-			e.failTask(chatID, fmt.Sprintf("Error fetching .torrent: %v", fetchErr))
-			e.editMarkdown(bot, statusMsgID, chatID,
-				fmt.Sprintf("*Error al descargar .torrent:* `%s`", fetchErr.Error()))
+			e.edit(bot, statusMsgID, chatID, fmt.Sprintf("*Fetch error:* `%s`", fetchErr.Error()))
 			e.mu.Lock()
 			delete(e.tasks, chatID)
 			e.mu.Unlock()
@@ -289,21 +236,17 @@ func (e *Engine) startDownload(bot *tgbotapi.BotAPI, chatID int64, replyTo int, 
 	}
 
 	if addErr != nil {
-		e.failTask(chatID, fmt.Sprintf("Error adding torrent: %v", addErr))
-		e.editMarkdown(bot, statusMsgID, chatID,
-			fmt.Sprintf("*Error al agregar torrent:* `%s`", addErr.Error()))
+		e.edit(bot, statusMsgID, chatID, fmt.Sprintf("*Add error:* `%s`", addErr.Error()))
 		e.mu.Lock()
 		delete(e.tasks, chatID)
 		e.mu.Unlock()
 		return
 	}
 
-	// Esperar metadatos (con timeout)
 	select {
 	case <-t.GotInfo():
 	case <-time.After(30 * time.Second):
-		e.failTask(chatID, "Timeout obteniendo metadatos")
-		e.editMarkdown(bot, statusMsgID, chatID, "*Timeout obteniendo metadatos del torrent.*")
+		e.edit(bot, statusMsgID, chatID, "*Timeout getting metadata.*")
 		t.Drop()
 		e.mu.Lock()
 		delete(e.tasks, chatID)
@@ -311,20 +254,18 @@ func (e *Engine) startDownload(bot *tgbotapi.BotAPI, chatID int64, replyTo int, 
 		return
 	}
 
-	// Registrar info del torrent en el task
 	name := t.Name()
-	infoHash := t.InfoHash().HexString()
 	totalLen := t.Length()
 
 	e.mu.RLock()
 	if task, ok := e.tasks[chatID]; ok {
 		task.mu.Lock()
-		task.InfoHash = infoHash
+		task.InfoHash = t.InfoHash().HexString()
 		task.Name = name
 		task.TotalBytes = totalLen
 		for _, f := range t.Files() {
-			if path := f.Path(); path != "" {
-				task.Files = append(task.Files, path)
+			if p := f.Path(); p != "" {
+				task.Files = append(task.Files, p)
 			}
 		}
 		task.mu.Unlock()
@@ -332,30 +273,22 @@ func (e *Engine) startDownload(bot *tgbotapi.BotAPI, chatID int64, replyTo int, 
 	e.mu.RUnlock()
 
 	t.Download()
+	e.edit(bot, statusMsgID, chatID,
+		fmt.Sprintf("*Added:* `%s`\nSize: `%s`\n*Looking for peers...*", name, formatBytes(totalLen)))
 
-	e.editMarkdown(bot, statusMsgID, chatID,
-		fmt.Sprintf("*Agregado:* `%s`\nTamano: `%s`\n*Buscando peers...*",
-			name, formatBytes(totalLen)))
-
-	// Lanzar goroutine de descarga
 	go e.downloadLoop(bot, chatID, replyTo, t, statusMsgID)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// downloadLoop — bucle principal de descarga con actualizacion de progreso
-// ─────────────────────────────────────────────────────────────────────────────
 func (e *Engine) downloadLoop(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t *torrent.Torrent, statusMsgID int) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[%d] PANIC en downloadLoop: %v", chatID, r)
-			e.editMarkdown(bot, statusMsgID, chatID, "*Error interno (panic).*")
+			log.Printf("[%d] PANIC: %v", chatID, r)
 		}
 	}()
 
-	ticker := time.NewTicker(ProgressUpdateInterval)
+	ticker := time.NewTicker(progressInterval)
 	defer ticker.Stop()
-
-	stallTicker := time.NewTicker(StallTimeout)
+	stallTicker := time.NewTicker(stallTimeout)
 	defer stallTicker.Stop()
 
 	var lastBytes int64
@@ -369,7 +302,6 @@ func (e *Engine) downloadLoop(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t
 	}
 
 	for {
-		// Verificar cancelacion
 		e.mu.RLock()
 		exists := e.tasks[chatID] != nil
 		e.mu.RUnlock()
@@ -380,7 +312,6 @@ func (e *Engine) downloadLoop(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t
 
 		completed := t.BytesCompleted()
 		total := t.Length()
-
 		if completed >= total && total > 0 {
 			break
 		}
@@ -389,13 +320,9 @@ func (e *Engine) downloadLoop(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t
 		case <-ticker.C:
 			pct := float64(completed) / float64(total) * 100
 			elapsed := time.Since(task.StartedAt).Seconds()
-
-			var speed string
+			speed := "connecting..."
 			if elapsed > 4 && completed > 0 {
-				bps := int64(float64(completed) / elapsed)
-				speed = formatBytes(bps) + "/s"
-			} else {
-				speed = "conectando..."
+				speed = formatBytes(int64(float64(completed)/elapsed)) + "/s"
 			}
 
 			task.mu.Lock()
@@ -404,10 +331,9 @@ func (e *Engine) downloadLoop(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t
 			task.mu.Unlock()
 
 			bar := progressBar(int(pct), 20)
-			e.editMarkdown(bot, statusMsgID, chatID,
-				fmt.Sprintf("*Descargando:* `%s`\n%s `%.1f%%`\n%s | %s / %s",
-					t.Name(), bar, pct, speed,
-					formatBytes(completed), formatBytes(total)))
+			e.edit(bot, statusMsgID, chatID,
+				fmt.Sprintf("*Downloading:* `%s`\n%s `%.1f%%`\n%s | %s / %s",
+					t.Name(), bar, pct, speed, formatBytes(completed), formatBytes(total)))
 
 			if completed > lastBytes {
 				lastBytes = completed
@@ -415,9 +341,9 @@ func (e *Engine) downloadLoop(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t
 			}
 
 		case <-stallTicker.C:
-			if time.Since(lastTime) >= StallTimeout {
-				log.Printf("[%d] Descarga estancada — sin actividad durante 90s", chatID)
-				e.editMarkdown(bot, statusMsgID, chatID, "*Descarga estancada — sin peers.*")
+			if time.Since(lastTime) >= stallTimeout {
+				log.Printf("[%d] stalled", chatID)
+				e.edit(bot, statusMsgID, chatID, "*Stalled — no peers.*")
 				e.mu.Lock()
 				delete(e.tasks, chatID)
 				e.mu.Unlock()
@@ -427,19 +353,15 @@ func (e *Engine) downloadLoop(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t
 		}
 	}
 
-	// Descarga completada
 	task.mu.Lock()
 	task.Done = true
 	task.Progress = 100
 	task.mu.Unlock()
 
-	e.editMarkdown(bot, statusMsgID, chatID, "*Descarga completa — subiendo a Telegram...*")
+	e.edit(bot, statusMsgID, chatID, "*Download complete — uploading to Telegram...*")
 	e.uploadFiles(bot, chatID, replyTo, t, statusMsgID)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// uploadFiles — sube los archivos descargados a Telegram
-// ─────────────────────────────────────────────────────────────────────────────
 func (e *Engine) uploadFiles(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t *torrent.Torrent, statusMsgID int) {
 	e.mu.RLock()
 	task := e.tasks[chatID]
@@ -453,15 +375,13 @@ func (e *Engine) uploadFiles(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t 
 	copy(files, task.Files)
 	task.mu.RUnlock()
 
-	uploaded := 0
-	failed := 0
+	uploaded, failed := 0, 0
 
 	for _, fPath := range files {
 		fullPath := filepath.Join(e.storage, fPath)
-
 		fi, err := os.Stat(fullPath)
 		if err != nil {
-			log.Printf("[%d] no se puede acceder a %s: %v", chatID, fPath, err)
+			log.Printf("[%d] stat %s: %v", chatID, fPath, err)
 			failed++
 			continue
 		}
@@ -469,22 +389,21 @@ func (e *Engine) uploadFiles(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t 
 			continue
 		}
 
-		log.Printf("[%d] Subiendo %s (%s)", chatID, fPath, formatBytes(fi.Size()))
+		log.Printf("[%d] uploading %s (%s)", chatID, fPath, formatBytes(fi.Size()))
 		bot.Send(tgbotapi.NewChatAction(chatID, tgbotapi.ChatUploadDocument))
 
 		sent := false
-		for attempt := 0; attempt < MaxRetries; attempt++ {
+		for attempt := 0; attempt < maxRetries; attempt++ {
 			doc := tgbotapi.NewDocumentUpload(chatID, fullPath)
 			doc.ReplyToMessageID = replyTo
 			doc.FileName = filepath.Base(fPath)
-
 			if _, err := bot.Send(doc); err == nil {
 				sent = true
 				break
 			} else {
-				log.Printf("[%d] Intento %d fallo para %s: %v", chatID, attempt+1, fPath, err)
+				log.Printf("[%d] attempt %d failed: %v", chatID, attempt+1, err)
 				if strings.Contains(err.Error(), "429") {
-					time.Sleep(RetryDelay * time.Duration(attempt+1))
+					time.Sleep(retryDelay * time.Duration(attempt+1))
 				} else {
 					break
 				}
@@ -494,68 +413,46 @@ func (e *Engine) uploadFiles(bot *tgbotapi.BotAPI, chatID int64, replyTo int, t 
 		if sent {
 			uploaded++
 		} else {
-			bot.Send(tgbotapi.NewMessage(chatID,
-				fmt.Sprintf("*No pude subir:* `%s`", fPath)))
+			bot.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("*Upload failed:* `%s`", fPath)))
 			failed++
 		}
-
-		time.Sleep(UploadPause)
+		time.Sleep(uploadPause)
 	}
 
-	// Limpiar tarea
 	e.mu.Lock()
 	delete(e.tasks, chatID)
 	e.mu.Unlock()
 
-	// Resumen
-	var summary string
+	summary := fmt.Sprintf("*Done!* Uploaded %d file(s).", uploaded)
 	if failed > 0 {
-		summary = fmt.Sprintf("*Listo!* Subi %d archivo(s), %d fallaron.", uploaded, failed)
-	} else {
-		summary = fmt.Sprintf("*Todo listo!* Subi %d archivo(s).", uploaded)
+		summary = fmt.Sprintf("*Done!* Uploaded %d, %d failed.", uploaded, failed)
 	}
 	bot.Send(tgbotapi.NewMessage(chatID, summary))
 
-	// Eliminar mensaje de progreso
-	deleteMsg := tgbotapi.NewDeleteMessage(chatID, statusMsgID)
-	bot.Request(deleteMsg)
+	bot.Request(tgbotapi.NewDeleteMessage(chatID, statusMsgID))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers: mensajes
-// ─────────────────────────────────────────────────────────────────────────────
-func (e *Engine) sendMarkdown(bot *tgbotapi.BotAPI, chatID int64, replyTo int, text string) {
+// ---- helpers ----
+
+func (e *Engine) send(bot *tgbotapi.BotAPI, chatID int64, replyTo int, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
 	msg.ReplyToMessageID = replyTo
 	msg.ParseMode = "Markdown"
 	if _, err := bot.Send(msg); err != nil {
-		log.Printf("[%d] error sendMarkdown: %v", chatID, err)
+		log.Printf("[%d] send err: %v", chatID, err)
 	}
 }
 
-func (e *Engine) editMarkdown(bot *tgbotapi.BotAPI, msgID int, chatID int64, text string) {
+func (e *Engine) edit(bot *tgbotapi.BotAPI, msgID int, chatID int64, text string) {
 	edit := tgbotapi.NewEditMessageText(chatID, msgID, text)
 	edit.ParseMode = "Markdown"
 	if _, err := bot.Request(edit); err != nil {
 		if !strings.Contains(err.Error(), "400") {
-			log.Printf("[%d] error editMarkdown: %v", chatID, err)
+			log.Printf("[%d] edit err: %v", chatID, err)
 		}
 	}
 }
 
-func (e *Engine) failTask(chatID int64, errMsg string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if task, ok := e.tasks[chatID]; ok {
-		task.mu.Lock()
-		task.Error = errMsg
-		task.mu.Unlock()
-	}
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers: formato y utilidades
-// ─────────────────────────────────────────────────────────────────────────────
 func isTorrentURL(s string) bool {
 	s = strings.TrimSpace(s)
 	return (strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")) &&
@@ -563,17 +460,15 @@ func isTorrentURL(s string) bool {
 }
 
 func fetchURL(rawURL string) ([]byte, error) {
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Get(rawURL)
+	c := &http.Client{Timeout: 60 * time.Second}
+	resp, err := c.Get(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", rawURL, err)
+		return nil, err
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d al descargar %s", resp.StatusCode, rawURL)
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-
 	return io.ReadAll(resp.Body)
 }
 
@@ -582,9 +477,9 @@ func formatBytes(n int64) string {
 	case n >= 1<<30:
 		return fmt.Sprintf("%.2f GB", float64(n)/(1<<30))
 	case n >= 1<<20:
-		return fmt.Sprintf("%.2f MB", float64(n)/(1<<20))
+		return fmt.Sprintf("%.1f MB", float64(n)/(1<<20))
 	case n >= 1<<10:
-		return fmt.Sprintf("%.2f KB", float64(n)/(1<<10))
+		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
 	default:
 		return strconv.FormatInt(n, 10) + " B"
 	}
@@ -598,89 +493,67 @@ func progressBar(percent, width int) string {
 		percent = 100
 	}
 	filled := percent * width / 100
-	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	return strings.Repeat("=", filled) + strings.Repeat("-", width-filled)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Polling loop
-// ─────────────────────────────────────────────────────────────────────────────
+// ---- polling ----
+
 func startPolling(bot *tgbotapi.BotAPI, engine *Engine) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-
 	updates := bot.GetUpdatesChan(u)
-
 	for update := range updates {
-		if update.Message == nil {
+		if update.Message == nil || strings.TrimSpace(update.Message.Text) == "" {
 			continue
 		}
-
 		chatID := update.Message.Chat.ID
-		replyTo := update.Message.MessageID
 		text := strings.TrimSpace(update.Message.Text)
-
-		if text == "" {
-			continue
-		}
-
 		log.Printf("[%d] << %s", chatID, text)
-		engine.HandleMessage(bot, chatID, replyTo, text)
+		engine.HandleMessage(bot, chatID, update.Message.MessageID, text)
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// main
-// ─────────────────────────────────────────────────────────────────────────────
+// ---- main ----
+
 func main() {
 	cfg := parseFlags()
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	log.Println("Starting TeleTorrent Bot")
+	log.Printf("Token: %s...", cfg.Token[:8])
+	log.Printf("Storage: %s", cfg.Storage)
 
-	log.Println("Iniciando TeleTorrent Bot v2.0")
-	log.Printf("   Token: %s...", cfg.Token[:8])
-	if cfg.ChannelID != 0 {
-		log.Printf("   Channel: %d", cfg.ChannelID)
-	}
-	log.Printf("   Storage: %s", cfg.Storage)
-
-	// Crear bot de Telegram
 	bot, err := tgbotapi.NewBotAPI(cfg.Token)
 	if err != nil {
-		log.Fatalf("Error creando bot: %v", err)
+		log.Fatalf("Bot init: %v", err)
 	}
-	log.Printf("Bot autorizado: @%s", bot.Self.UserName)
+	log.Printf("Authorized as @%s", bot.Self.UserName)
 
-	// Si se especifico un channel, verificarlo
 	if cfg.ChannelID != 0 {
-		chat, err := bot.GetChat(tgbotapi.ChatInfoConfig{
+		if ch, err := bot.GetChat(tgbotapi.ChatInfoConfig{
 			ChatConfig: tgbotapi.ChatConfig{ChatID: cfg.ChannelID},
-		})
-		if err != nil {
-			log.Printf("No se pudo verificar el channel: %v (continuando de todas formas)", err)
+		}); err != nil {
+			log.Printf("Warning: channel check: %v", err)
 		} else {
-			log.Printf("Channel verificado: %s", chat.Title)
+			log.Printf("Channel: %s", ch.Title)
 		}
 	}
 
-	// Crear motor de descargas
 	engine, err := NewEngine(cfg)
 	if err != nil {
-		log.Fatalf("Error creando engine: %v", err)
+		log.Fatalf("Engine init: %v", err)
 	}
 	defer engine.Close()
 
-	// Capturar senales para cierre graceful
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		<-sigCh
-		log.Println("Senal recibida, cerrando...")
+		<-sig
+		log.Println("Shutting down...")
 		bot.StopReceivingUpdates()
 		engine.Close()
 		os.Exit(0)
 	}()
 
-	// Iniciar polling
-	log.Println("Escuchando mensajes...")
+	log.Println("Listening for messages...")
 	startPolling(bot, engine)
 }
