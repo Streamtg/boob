@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-🚀 TeleTorrent Bot v9.0 - DEFINITIVA Y COMPLETA
+🚀 TeleTorrent Bot v9.1 - DEFINITIVA Y FUNCIONANDO
 Transmission integrado automáticamente
-Descarga torrents reales, sube a Telegram, limpia automáticamente
-SIN CONFIGURACIÓN MANUAL
 """
 
 import asyncio
@@ -21,23 +19,9 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 # ═══ IMPORTACIONES ═══════════════════════════════════════════════════════════
-try:
-    from telethon import TelegramClient, events
-except ImportError:
-    print("❌ ERROR: pip install telethon")
-    sys.exit(1)
-
-try:
-    import requests
-except ImportError:
-    print("❌ ERROR: pip install requests")
-    sys.exit(1)
-
-try:
-    import transmissionrpc
-except ImportError:
-    print("❌ ERROR: pip install transmission-rpc")
-    sys.exit(1)
+from telethon import TelegramClient, events
+import requests
+import transmissionrpc
 
 # ═══ CONFIGURACION ═══════════════════════════════════════════════════════════
 class Config:
@@ -96,10 +80,8 @@ class TransmissionManager:
             "announce-ip": "",
             "announce-ip-enabled": False,
             "anti-ip-blocklist": False,
-            "anti-ip-blocklist-url": "http://list.iblocklist.com/lists/blueeye/anti-p2p/iplist.txt",
             "blocklist-enabled": False,
             "blocklist-updates-enabled": True,
-            "blocklist-url": "http://list.iblocklist.com/lists/level1/anti-p2p/iplist.txt",
             "cache-size-mb": 16,
             "compact-view": False,
             "dht-enabled": True,
@@ -125,7 +107,6 @@ class TransmissionManager:
             "metainfo-dir-enabled": False,
             "network-bind-address-ipv4": "127.0.0.1",
             "network-bind-address-ipv6": "::1",
-            "peer-congestion-algorithm": "",
             "peer-dht-enabled": True,
             "peer-exchange-enabled": True,
             "peer-id-ttl-hours": 6,
@@ -136,7 +117,6 @@ class TransmissionManager:
             "peer-port-random-low": 6881,
             "peer-port-random-on-start": False,
             "peer-scrobbler-enabled": False,
-            "peer-socket-tos": "default",
             "pex-enabled": True,
             "port-forwarding-enabled": False,
             "preallocation": 1,
@@ -183,7 +163,6 @@ class TransmissionManager:
             "torrent-added-notification-enabled": True,
             "torrent-complete-notification-enabled": True,
             "torrent-complete-script-enabled": False,
-            "torrent-complete-script-filename": "",
             "torrenting-enabled": True,
             "trash-can-enabled": True,
             "trash-original-torrent-files": False,
@@ -490,7 +469,7 @@ class TorrentBot:
         @self.client.on(events.NewMessage(pattern=r"^/start$|^/help$"))
         async def help_cmd(event):
             await event.reply(
-                "*🚀 TeleTorrent Bot v9.0*\n\n"
+                "*🚀 TeleTorrent Bot v9.1*\n\n"
                 "Transmission Integrado\n"
                 "Descarga torrents reales\n\n"
                 "*Comandos:*\n"
@@ -785,7 +764,7 @@ async def main(bot):
 
 if __name__ == "__main__":
     log.info("=" * 70)
-    log.info("🚀 TeleTorrent Bot v9.0 - TRANSMISSION INTEGRADO")
+    log.info("🚀 TeleTorrent Bot v9.1 - TRANSMISSION INTEGRADO")
     log.info("=" * 70)
     
     bot = TorrentBot()
@@ -797,4 +776,8 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    asyncio.run(main(bot))
+    try:
+        asyncio.run(main(bot))
+    except Exception as e:
+        log.error(f"Error: {e}")
+        sys.exit(1)
