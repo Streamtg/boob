@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"log"
-	"os"
 	"strconv"
 )
 
@@ -12,9 +11,7 @@ type Config struct {
 	ChannelID  int64
 	Storage    string
 	Port       int
-	DownloadLimit int64
-	MaxFileSize   int64
-	MaxTasks      int
+	MaxFileSize int64
 }
 
 var appConfig Config
@@ -23,9 +20,8 @@ func parseFlags() Config {
 	token := flag.String("token", "", "Telegram Bot Token (required)")
 	channel := flag.String("channel", "", "Canal ID (opcional)")
 	storage := flag.String("storage", "./downloads", "Directorio de descargas")
-	port := flag.Int("port", 0, "Puerto DHT")
-	downloadLimit := flag.Int("download-limit", 0, "Límite de descarga KB/s (0 = ilimitado)")
-	maxFileSize := flag.Int("max-file-size", 1990, "Tamaño máximo de archivo en MB")
+	port := flag.Int("port", 0, "Puerto DHT (0=aleatorio)")
+	maxFileSize := flag.Int("max-file-size", 1990, "Tamano maximo en MB")
 	flag.Parse()
 
 	if *token == "" {
@@ -33,12 +29,10 @@ func parseFlags() Config {
 	}
 
 	cfg := Config{
-		Token:      *token,
-		Storage:    *storage,
-		Port:       *port,
-		DownloadLimit: int64(*downloadLimit),
-		MaxFileSize:   int64(*maxFileSize),
-		MaxTasks:      1,
+		Token:       *token,
+		Storage:     *storage,
+		Port:        *port,
+		MaxFileSize: int64(*maxFileSize),
 	}
 	if *channel != "" {
 		id, err := strconv.ParseInt(*channel, 10, 64)
