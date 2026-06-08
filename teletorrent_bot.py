@@ -21,25 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-try:
-    import libtorrent as lt
-except ImportError:
-    print("ERROR: pip install python-libtorrent")
-    sys.exit(1)
-
-try:
-    from telethon import TelegramClient, events
-except ImportError:
-    print("ERROR: pip install telethon")
-    sys.exit(1)
-
-try:
-    import requests
-except ImportError:
-    print("ERROR: pip install requests")
-    sys.exit(1)
-
-# ═══ CONFIGURACION ═══════════════════════════════════════════════════════════
+# ═══ CONFIGURACION GLOBAL ════════════════════════════════════════════════════
+# Declarar ANTES de usarlas
 API_ID = 34280578
 API_HASH = "b77ac49b31b12365b98f2333bd4c3eb0"
 BOT_TOKEN = "8835976877:AAHZyBbv_6MmVSnQ5rdM4Csq8Qjrb3Zjy60"
@@ -47,6 +30,29 @@ CHANNEL_ID = -1003213143951
 STORAGE_PATH = "./downloads"
 MAX_WORKERS = 3
 UPDATE_INTERVAL = 2
+
+# ═══ IMPORTACIONES CON MANEJO DE ERRORES ═════════════════════════════════════
+try:
+    import libtorrent as lt
+except ImportError:
+    print("❌ ERROR: libtorrent no está instalado")
+    print("\n📥 Instala con:")
+    print("   Linux/Ubuntu: pip install --no-binary :all: libtorrent-rasterbar")
+    print("   macOS: brew install libtorrent-rasterbar && pip install libtorrent")
+    print("   Windows: pip install libtorrent")
+    sys.exit(1)
+
+try:
+    from telethon import TelegramClient, events
+except ImportError:
+    print("❌ ERROR: pip install telethon")
+    sys.exit(1)
+
+try:
+    import requests
+except ImportError:
+    print("❌ ERROR: pip install requests")
+    sys.exit(1)
 
 # ═══ LOGGING ═════════════════════════════════════════════════════════════════
 logging.basicConfig(
@@ -494,10 +500,9 @@ class TeleTorrentBot:
         @self.client.on(events.NewMessage(pattern=r"^/cache$"))
         async def cache_h(event):
             count = len(self.file_cache)
-            size = sum(
-                os.path.getsize(self.cache_file) 
-                for _ in [1] if self.cache_file.exists()
-            )
+            size = 0
+            if self.cache_file.exists():
+                size = os.path.getsize(self.cache_file)
             
             await event.reply(
                 f"*Estado de caché:*\n"
@@ -747,6 +752,19 @@ class TeleTorrentBot:
         log.info("✓ Bot detenido")
 
 # ═══ MAIN ════════════════════════════════════════════════════════════════════
+async def main_async(bot):
+    """Función principal async"""
+    try:
+        await bot.start()
+    except KeyboardInterrupt:
+        log.info("Interrupción del usuario")
+    except Exception as e:
+        log.error(f"Error fatal: {e}")
+    finally:
+        await bot.stop()
+        cleanup_temp()
+        log.info("✓ Limpieza completada")
+
 def main():
     """Función principal"""
     parser = argparse.ArgumentParser(description="TeleTorrent Bot v3.0")
@@ -756,10 +774,10 @@ def main():
     
     args = parser.parse_args()
     
-    global BOT_TOKEN, CHANNEL_ID, STORAGE_PATH
-    BOT_TOKEN = args.token
-    CHANNEL_ID = args.channel
-    STORAGE_PATH = args.storage
+    # Usar globals() para actualizar variables globales
+    globals()['BOT_TOKEN'] = args.token
+    globals()['CHANNEL_ID'] = args.channel
+    globals()['STORAGE_PATH'] = args.storage
     
     log.info("=" * 60)
     log.info("TeleTorrent Bot v3.0 (Python) - Iniciando...")
@@ -776,14 +794,11 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     try:
-        asyncio.run(bot.start())
-    except KeyboardInterrupt:
-        log.info("Interrupción del usuario")
+        asyncio.run(main_async(bot))
     except Exception as e:
-        log.error(f"Error fatal: {e}")
+        log.error(f"Error: {e}")
     finally:
         cleanup_temp()
-        log.info("✓ Limpieza completada")
 
 if __name__ == "__main__":
     main()
