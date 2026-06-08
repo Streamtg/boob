@@ -12,7 +12,6 @@ import (
 
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/message"
-	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
@@ -59,24 +58,23 @@ func (m *MTProtoClient) Start(chatID int64) error {
 		err := m.client.Run(ctx, func(runCtx context.Context) error {
 			api := m.client.API()
 
-			// Intentar sesión guardada
 			_, err := m.client.Self(runCtx)
 			if err == nil {
-				log.Println("MTProto: sesión existente recuperada")
+				log.Println("MTProto: session found")
 				m.authed = true
 				m.sender = message.NewSender(api)
 				m.uploader = uploader.NewUploader(api)
 				peer, _ := m.resolvePeer(runCtx, chatID)
 				m.peer = peer
 				close(m.ready)
-				log.Println("MTProto: listo!")
+				log.Println("MTProto: ready!")
 				<-runCtx.Done()
 				return nil
 			}
 
-			// Autenticación interactiva
 			fmt.Print("\n=== MTProto Authentication ===\n")
 			reader := bufio.NewReader(os.Stdin)
+
 			fmt.Print("Enter phone number (e.g., +1234567890): ")
 			phone, _ := reader.ReadString('\n')
 			phone = strings.TrimSpace(phone)
@@ -95,7 +93,7 @@ func (m *MTProtoClient) Start(chatID int64) error {
 			}
 			sent, ok := sentCode.(*tg.AuthSentCode)
 			if !ok {
-				return fmt.Errorf("unexpected response: %T", sentCode)
+				return fmt.Errorf("unexpected: %T", sentCode)
 			}
 
 			fmt.Print("Enter verification code (sent to Telegram): ")
@@ -135,7 +133,7 @@ func (m *MTProtoClient) Start(chatID int64) error {
 			peer, _ := m.resolvePeer(runCtx, chatID)
 			m.peer = peer
 			close(m.ready)
-			log.Println("MTProto: listo!")
+			log.Println("MTProto: ready!")
 			<-runCtx.Done()
 			return nil
 		})
@@ -154,6 +152,7 @@ func (m *MTProtoClient) WaitReady() bool {
 
 func (m *MTProtoClient) resolvePeer(ctx context.Context, chatID int64) (tg.InputPeerClass, error) {
 	api := m.client.API()
+	// First try: get from dialogs
 	dialogs, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{Limit: 100})
 	if err == nil {
 		switch d := dialogs.(type) {
@@ -171,14 +170,12 @@ func (m *MTProtoClient) resolvePeer(ctx context.Context, chatID int64) (tg.Input
 			}
 		}
 	}
-	// Intentar obtener access hash por API directa
-	ch, err := api.ChannelsGetChannels(ctx, &tg.ChannelsGetChannelsRequest{
-		ID: []tg.InputChannelClass{
-			&tg.InputChannel{ChannelID: chatID, AccessHash: 0},
-		},
+	// Second try: ChannelsGetChannels (correct API)
+	channels, err2 := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
+		&tg.InputChannel{ChannelID: chatID, AccessHash: 0},
 	})
-	if err == nil {
-		if chats, ok := ch.(*tg.MessagesChats); ok && len(chats.Chats) > 0 {
+	if err2 == nil {
+		if chats, ok := channels.(*tg.MessagesChats); ok && len(chats.Chats) > 0 {
 			if ch2, ok := chats.Chats[0].(*tg.Channel); ok {
 				return &tg.InputPeerChannel{ChannelID: ch2.ID, AccessHash: ch2.AccessHash}, nil
 			}
@@ -189,22 +186,20 @@ func (m *MTProtoClient) resolvePeer(ctx context.Context, chatID int64) (tg.Input
 
 func (m *MTProtoClient) SendLargeFile(filePath, fileName string, replyTo int) error {
 	if !m.authed {
-		return fmt.Errorf("MTProto no autenticado")
+		return fmt.Errorf("MTProto not authenticated")
 	}
-	log.Printf("MTProto: subiendo %s...", fileName)
+	log.Printf("MTProto: uploading %s...", fileName)
 
-	// Limpiar nombre de caracteres problemáticos
 	cleanName := strings.NewReplacer(
 		"[", "", "]", "", "{", "", "}", "",
 		"(", "", ")", "", "|", "-", "\"", "",
 	).Replace(fileName)
 
-	// Upload con FromPath (lee el archivo directamente)
 	upload, err := m.uploader.FromPath(m.ctx, filePath)
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
-	log.Printf("MTProto: upload completado, enviando a Telegram...")
+	log.Printf("MTProto: upload complete, sending...")
 
 	doc := &tg.InputMediaUploadedDocument{
 		File: upload,
@@ -225,19 +220,6 @@ func (m *MTProtoClient) SendLargeFile(filePath, fileName string, replyTo int) er
 	api := m.client.API()
 	_, err = api.MessagesSendMedia(m.ctx, req)
 	return err
-}
-
-func (m *MTProtoClient) SendViaSender(chatID int64, filePath, fileName string) error {
-	if !m.authed {
-		return fmt.Errorf("MTProto no autenticado")
-	}
-	cleanName := strings.NewReplacer("[", "", "]", "").Replace(fileName)
-	_, err := m.sender.To(m.peer).File(m.ctx, uploader.NewUploader(m.client.API()).FromPath(m.ctx, filePath))
-	if err != nil {
-		// Fallback al método directo
-		return m.SendLargeFile(filePath, cleanName, 0)
-	}
-	return nil
 }
 
 func (m *MTProtoClient) IsAuthed() bool { return m.authed }
@@ -263,3 +245,4 @@ func (s *sessionStorage) LoadSession(ctx context.Context) ([]byte, error) {
 func (s *sessionStorage) StoreSession(ctx context.Context, data []byte) error {
 	return os.WriteFile(s.path, data, 0600)
 }
+GOEOF
