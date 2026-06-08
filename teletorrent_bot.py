@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-TeleTorrent Bot v3.1 - Python (Usando Aria2)
+TeleTorrent Bot v3.2 - Python (Usando Aria2)
 Descarga torrents y archivos a través de Telegram
-Credenciales integradas
+Credenciales integradas - CON DETECCIÓN MEJORADA DE TORRENTS
 """
 
 import asyncio
@@ -77,6 +77,10 @@ class DownloadClient:
     def __init__(self, storage_path: str):
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
+        
+        # Crear carpeta para torrents
+        self.torrent_path = self.storage_path / "torrents"
+        self.torrent_path.mkdir(exist_ok=True)
         
         self.active_downloads: dict = {}
         self.processes: dict = {}
@@ -153,8 +157,17 @@ class DownloadClient:
         try:
             # Limpiar nombre
             name = name.replace(".torrent", "").strip()
+            if not name:
+                name = f"torrent_{int(time.time())}"
             
-            torrent_path = self.storage_path / f"{name}.torrent"
+            # Guardar archivo torrent
+            safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', name)
+            torrent_path = self.torrent_path / f"{safe_name}.torrent"
+            
+            # Si ya existe, agregar timestamp
+            if torrent_path.exists():
+                torrent_path = self.torrent_path / f"{safe_name}_{int(time.time())}.torrent"
+            
             torrent_path.write_bytes(torrent_data)
             
             download_id = hashlib.md5(torrent_data).hexdigest()[:8]
@@ -171,7 +184,7 @@ class DownloadClient:
                 "started_at": time.time(),
             }
             
-            log.info(f"✓ Torrent agregado: {name}")
+            log.info(f"✓ Torrent agregado: {name} (archivo: {torrent_path.name})")
             
             return {
                 "download_id": download_id,
@@ -190,6 +203,9 @@ class DownloadClient:
             name = name.split("?")[0].split("#")[0]
             if not name or name.endswith("/"):
                 name = "descarga"
+            
+            # Limitar longitud del nombre
+            name = name[-100:]  # Últimos 100 caracteres
             
             download_id = hashlib.md5(url.encode()).hexdigest()[:8]
             
@@ -377,18 +393,52 @@ class DownloadClient:
             
             if d["type"] == "magnet":
                 cmd.append(d["uri"])
+                log.info(f"🚀 Iniciando descarga de magnet: {d['name']}")
             elif d["type"] == "torrent":
-                cmd.append(d["path"])
+                torrent_file = d["path"]
+                if not os.path.exists(torrent_file):
+                    log.error(f"Archivo torrent no encontrado: {torrent_file}")
+                    d["status"] = "error"
+                    return
+                
+                cmd.append(torrent_file)
+                log.info(f"🚀 Iniciando descarga de torrent: {d['name']} ({torrent_file})")
+            
+            log.info(f"📡 Ejecutando: {' '.join(cmd)}")
             
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True
+                text=True,
+                bufsize=1
             )
             
             self.processes[download_id] = proc
             d["status"] = "downloading"
+            
+            # Leer output en tiempo real
+            import threading
+            
+            def read_output():
+                try:
+                    for line in proc.stdout:
+                        if line and d["status"] == "downloading":
+                            log.debug(f"[aria2] {line.strip()}")
+                            # Intentar extraer progreso del output
+                            if "%" in line:
+                                try:
+                                    # Buscar porcentaje
+                                    match = re.search(r"(\d+)%", line)
+                                    if match:
+                                        d["progress"] = float(match.group(1))
+                                except:
+                                    pass
+                except:
+                    pass
+            
+            thread = threading.Thread(target=read_output, daemon=True)
+            thread.start()
             
             # Esperar a que termine
             stdout, stderr = proc.communicate()
@@ -399,7 +449,7 @@ class DownloadClient:
                 log.info(f"✅ Completado: {d['name']}")
             else:
                 d["status"] = "error"
-                log.error(f"Error aria2: {stderr[:200]}")
+                log.error(f"Error aria2 (código {proc.returncode}): {stderr[:200]}")
             
             if download_id in self.processes:
                 del self.processes[download_id]
@@ -422,8 +472,8 @@ class DownloadClient:
         try:
             for item in self.storage_path.rglob("*"):
                 if item.is_file() and item.stat().st_size > 0:
-                    # Evitar archivos de torrent
-                    if not item.name.endswith(".torrent"):
+                    # Evitar archivos de torrent y caché
+                    if not item.name.endswith(".torrent") and not item.name.startswith("."):
                         files.append(str(item))
         except:
             pass
@@ -465,7 +515,7 @@ class TeleTorrentBot:
         self.active_tasks: dict = {}
         self.status_messages: dict = {}
         
-        # Cliente Telegram con credenciales integradas (SIN spawn_read_thread)
+        # Cliente Telegram con credenciales integradas
         self.client = TelegramClient(
             "teletorrent_session",
             self.config.API_ID,
@@ -557,7 +607,7 @@ class TeleTorrentBot:
         @self.client.on(events.NewMessage(pattern=r"^/start$|^/help$"))
         async def help_h(event):
             await event.reply(
-                "*🚀 TeleTorrent Bot v3.1*\n\n"
+                "*🚀 TeleTorrent Bot v3.2*\n\n"
                 "Descarga torrents y archivos a Telegram\n"
                 "sin límites de 50MB.\n\n"
                 "*📋 Comandos:*\n"
@@ -570,7 +620,7 @@ class TeleTorrentBot:
                 "• Magnet link\n"
                 "• URL .torrent\n"
                 "• Link HTTP/HTTPS\n"
-                "• Archivo .torrent",
+                "• Archivo .torrent (adjuntado)",
                 parse_mode="markdown"
             )
 
@@ -643,38 +693,72 @@ class TeleTorrentBot:
 
         @self.client.on(events.NewMessage)
         async def msg_h(event):
+            # Manejo de texto
             text = (event.message.text or "").strip()
             
             if text.startswith("/"):
                 return
             
-            if any(text.startswith(p) for p in ["magnet:", "http://", "https://", "file://"]):
+            # Detectar magnet, URL torrent, URL HTTP
+            if text.startswith("magnet:"):
+                log.info(f"📌 Detectado magnet link")
                 await self._start_download(event, text)
-            elif event.message.document:
+                return
+            elif text.endswith(".torrent"):
+                log.info(f"📌 Detectada URL .torrent")
+                await self._start_download(event, text)
+                return
+            elif text.startswith(("http://", "https://", "ftp://")):
+                log.info(f"📌 Detectada URL")
+                await self._start_download(event, text)
+                return
+            
+            # Manejo de archivos adjuntos
+            if event.message.document:
+                log.info(f"📌 Detectado archivo adjunto")
                 await self._handle_torrent_file(event)
+                return
 
     async def _handle_torrent_file(self, event):
-        """Maneja archivos .torrent"""
+        """Maneja archivos .torrent adjuntos"""
         if not event.message.document:
-            return
-        
-        mime_type = event.message.document.mime_type or ""
-        if not ("torrent" in mime_type or event.message.document.file_name.endswith(".torrent")):
-            await event.reply("*Solo archivos .torrent* ❌")
+            log.warning("No hay documento en el mensaje")
             return
         
         cid = event.chat_id
+        doc = event.message.document
+        file_name = doc.file_name or "descarga.torrent"
+        
+        log.info(f"Procesando archivo: {file_name} (tipo: {doc.mime_type})")
+        
+        # Verificar que sea un archivo torrent
+        is_torrent = (
+            "torrent" in (doc.mime_type or "").lower() or 
+            file_name.lower().endswith(".torrent")
+        )
+        
+        if not is_torrent:
+            log.warning(f"Archivo no es torrent: {doc.mime_type}")
+            await event.reply("*❌ Solo archivos .torrent*", parse_mode="markdown")
+            return
         
         if cid in self.active_tasks:
-            await event.reply("*Ya hay descarga activa* 🔄")
+            await event.reply("*Ya hay descarga activa* 🔄", parse_mode="markdown")
             return
         
         sm = await event.reply("*⏳ Procesando archivo .torrent...*", parse_mode="markdown")
         self.status_messages[cid] = sm
         
         try:
+            log.info(f"Descargando contenido del archivo {file_name}")
             file_data = await event.message.download_media(bytes)
-            file_name = event.message.document.file_name or "descarga.torrent"
+            
+            if not file_data or len(file_data) == 0:
+                log.error("Archivo vacío")
+                await sm.edit("*❌ Archivo vacío*")
+                return
+            
+            log.info(f"Tamaño del archivo: {len(file_data)} bytes")
             
             info = self.download_client.add_torrent_file(file_data, file_name)
             
@@ -686,20 +770,23 @@ class TeleTorrentBot:
             )
             
             # Iniciar descarga
+            log.info(f"Iniciando descarga del torrent: {info['download_id']}")
             self.download_client.start_download(info["download_id"])
             
             asyncio.create_task(self._monitor(cid, info["download_id"]))
             
         except Exception as e:
-            log.error(f"Error: {e}")
+            log.error(f"Error procesando torrent: {e}", exc_info=True)
             await sm.edit(f"*❌ Error:* `{str(e)[:100]}`")
+            if cid in self.active_tasks:
+                del self.active_tasks[cid]
 
     async def _start_download(self, event, text):
-        """Inicia una descarga"""
+        """Inicia una descarga desde URL o magnet"""
         cid = event.chat_id
         
         if cid in self.active_tasks:
-            await event.reply("*Ya hay descarga activa* 🔄")
+            await event.reply("*Ya hay descarga activa* 🔄", parse_mode="markdown")
             return
         
         sm = await event.reply("*⏳ Procesando...*", parse_mode="markdown")
@@ -707,21 +794,34 @@ class TeleTorrentBot:
         
         try:
             if text.startswith("magnet:"):
+                log.info(f"Procesando magnet link")
                 info = self.download_client.add_magnet(text)
                 await sm.edit(f"*📥 Magnet:* `{info['name'][:40]}`")
                 
             elif text.endswith(".torrent"):
+                log.info(f"Descargando archivo torrent desde URL: {text}")
                 await sm.edit("*📥 Descargando archivo .torrent...*")
-                r = requests.get(text, timeout=30)
-                if r.status_code != 200:
-                    await sm.edit(f"*❌ Error HTTP {r.status_code}*")
+                try:
+                    r = requests.get(text, timeout=30)
+                    if r.status_code != 200:
+                        await sm.edit(f"*❌ Error HTTP {r.status_code}*")
+                        if cid in self.active_tasks:
+                            del self.active_tasks[cid]
+                        return
+                    
+                    filename = text.split("/")[-1] or "descarga.torrent"
+                    log.info(f"Torrent descargado: {len(r.content)} bytes")
+                    info = self.download_client.add_torrent_file(r.content, filename)
+                except Exception as e:
+                    log.error(f"Error descargando URL .torrent: {e}")
+                    await sm.edit(f"*❌ Error:* `{str(e)[:100]}`")
+                    if cid in self.active_tasks:
+                        del self.active_tasks[cid]
                     return
-                
-                filename = text.split("/")[-1]
-                info = self.download_client.add_torrent_file(r.content, filename)
                 
             else:
                 # HTTP directo
+                log.info(f"Procesando URL HTTP: {text}")
                 try:
                     r = requests.head(text, timeout=10, allow_redirects=True)
                     filename = text.split("/")[-1] or "descarga"
@@ -739,12 +839,13 @@ class TeleTorrentBot:
             )
             
             # Iniciar descarga
+            log.info(f"Iniciando descarga: {info['download_id']}")
             self.download_client.start_download(info["download_id"])
             
             asyncio.create_task(self._monitor(cid, info["download_id"]))
             
         except Exception as e:
-            log.error(f"Error: {e}")
+            log.error(f"Error iniciando descarga: {e}", exc_info=True)
             await sm.edit(f"*❌ Error:* `{str(e)[:100]}`")
             if cid in self.active_tasks:
                 del self.active_tasks[cid]
@@ -760,7 +861,7 @@ class TeleTorrentBot:
                 
                 if not p:
                     check_count += 1
-                    if check_count > 30:  # 30 segundos
+                    if check_count > 60:  # 60 segundos
                         break
                     await asyncio.sleep(1)
                     continue
@@ -772,8 +873,10 @@ class TeleTorrentBot:
                     await self._upd_progress(cid, p)
                 
                 if p["status"] == "completed":
+                    log.info(f"Descarga completada: {download_id}")
                     break
                 elif p["status"] in ["error", "cancelled"]:
+                    log.info(f"Descarga {p['status']}: {download_id}")
                     break
                 
                 await asyncio.sleep(1)
@@ -782,12 +885,14 @@ class TeleTorrentBot:
             
             files = self.download_client.get_completed_files(download_id)
             if files:
+                log.info(f"Archivos encontrados: {len(files)}")
                 await self._upload(cid, files)
             else:
+                log.warning(f"Sin archivos para subir")
                 await self._upd_msg(cid, "*⚠ Sin archivos para subir*")
                 
         except Exception as e:
-            log.error(f"Error monitor: {e}")
+            log.error(f"Error monitor: {e}", exc_info=True)
             await self._upd_msg(cid, f"*❌ Error:* `{str(e)[:80]}`")
         finally:
             if cid in self.active_tasks:
@@ -909,7 +1014,7 @@ async def main_async(bot):
 def main():
     """Main"""
     log.info("=" * 60)
-    log.info("🚀 TeleTorrent Bot v3.1 - Iniciando")
+    log.info("🚀 TeleTorrent Bot v3.2 - Iniciando")
     log.info("=" * 60)
     log.info(f"📌 Credenciales integradas")
     log.info(f"🔧 Usando cliente de descarga automático")
