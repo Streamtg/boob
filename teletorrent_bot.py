@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-🚀 TeleTorrent Bot v10.0 - CON QBITTORRENT
-Descarga torrents reales, sube a Telegram, limpia automáticamente
-SIN COMPLICACIONES
+🚀 TeleTorrent Bot v11.0 - DEFINITIVA
+Solo Telegram + requests
+Descarga magnet links y URLs directas
 """
 
 import asyncio
@@ -11,40 +11,24 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sys
 import subprocess
 import time
-import threading
 from pathlib import Path
 from typing import Optional, Dict, List
 
-# ═══ IMPORTACIONES ═══════════════════════════════════════════════════════════
 from telethon import TelegramClient, events
 import requests
 
-try:
-    from qbittorrent import Client
-except ImportError:
-    print("Instalando qbittorrent...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "qbittorrent==2.0.0"], check=True)
-    from qbittorrent import Client
-
 # ═══ CONFIGURACION ═══════════════════════════════════════════════════════════
 class Config:
-    """Configuración"""
-    
-    # Telegram
     API_ID = 34280578
     API_HASH = "b77ac49b31b12365b98f2333bd4c3eb0"
     BOT_TOKEN = "8835976877:AAHZyBbv_6MmVSnQ5rdM4Csq8Qjrb3Zjy60"
     CHANNEL_ID = -1003213143951
-    
-    # qBittorrent
-    QBIT_HOST = "http://127.0.0.1:8080"
-    QBIT_USERNAME = "admin"
-    QBIT_PASSWORD = "adminPassword"
-    QBIT_DOWNLOAD_DIR = str(Path.home() / "downloads" / "torrents")
+    STORAGE_PATH = "./downloads"
 
 # ═══ LOGGING ═════════════════════════════════════════════════════════════════
 logging.basicConfig(
@@ -54,290 +38,74 @@ logging.basicConfig(
 )
 log = logging.getLogger("TeleTorrent")
 
-# ═══ GESTOR QBITTORRENT ══════════════════════════════════════════════════════
-class QBitManager:
-    """Gestor automático de qBittorrent"""
-
-    @staticmethod
-    def start():
-        """Inicia qBittorrent daemon"""
-        if QBitManager.is_running():
-            log.info("✓ qBittorrent ya está corriendo")
-            return
-        
-        log.info("🚀 Iniciando qBittorrent...")
-        
-        try:
-            # Matar procesos anteriores
-            subprocess.run(["pkill", "-f", "qbittorrent"], capture_output=True, timeout=5)
-            time.sleep(1)
-            
-            # Crear directorio
-            download_dir = Path(Config.QBIT_DOWNLOAD_DIR)
-            download_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Iniciar qBittorrent
-            subprocess.Popen(
-                ["qbittorrent", "--webui-port=8080"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
-            
-            # Esperar a que inicie
-            time.sleep(3)
-            
-            if QBitManager.is_running():
-                log.info("✓ qBittorrent iniciado correctamente")
-            else:
-                log.error("❌ qBittorrent no inició")
-                sys.exit(1)
-                
-        except Exception as e:
-            log.error(f"❌ Error: {e}")
-            sys.exit(1)
-
-    @staticmethod
-    def is_running() -> bool:
-        """Verifica si qBittorrent está corriendo"""
-        try:
-            result = subprocess.run(
-                ["pgrep", "-f", "qbittorrent"],
-                capture_output=True,
-                timeout=5
-            )
-            return result.returncode == 0
-        except:
-            return False
-
-    @staticmethod
-    def stop():
-        """Detiene qBittorrent"""
-        try:
-            subprocess.run(["pkill", "-f", "qbittorrent"], capture_output=True, timeout=5)
-            log.info("✓ qBittorrent detenido")
-        except:
-            pass
-
-# ═══ CLIENTE QBITTORRENT ═════════════════════════════════════════════════════
-class QBitClient:
-    """Cliente qBittorrent"""
-
-    def __init__(self):
-        """Inicializa cliente"""
-        self.torrents: Dict = {}
-        self.lock = threading.Lock()
-        self.client = None
-        
-        # Conectar
-        self._connect()
-
-    def _connect(self):
-        """Conecta al cliente qBittorrent"""
-        max_retries = 30
-        retry_count = 0
-        
-        while retry_count < max_retries:
-            try:
-                self.client = Client(Config.QBIT_HOST)
-                self.client.login(Config.QBIT_USERNAME, Config.QBIT_PASSWORD)
-                
-                log.info(f"✅ qBittorrent conectado")
-                log.info(f"📁 Directorio: {Config.QBIT_DOWNLOAD_DIR}")
-                return
-                
-            except Exception as e:
-                retry_count += 1
-                if retry_count < max_retries:
-                    log.warning(f"⚠ Reintentando ({retry_count}/{max_retries})...")
-                    time.sleep(1)
-                else:
-                    log.error(f"❌ No se pudo conectar después de {max_retries} intentos")
-                    sys.exit(1)
-
-    def add_magnet(self, magnet_uri: str) -> Dict:
-        """Agrega magnet"""
-        try:
-            log.info(f"📥 Agregando magnet...")
-            
-            self.client.download_from_link(
-                magnet_uri,
-                savepath=Config.QBIT_DOWNLOAD_DIR
-            )
-            
-            # Esperar a que aparezca en la lista
-            time.sleep(1)
-            
-            torrents = self.client.torrents()
-            if torrents:
-                torrent = torrents[0]
-                torrent_id = torrent['hash']
-                name = torrent['name']
-                
-                with self.lock:
-                    self.torrents[torrent_id] = {
-                        "id": torrent_id,
-                        "name": name,
-                    }
-                
-                log.info(f"✓ Magnet: {name}")
-                
-                return {
-                    "torrent_id": torrent_id,
-                    "name": name,
-                }
-            
-        except Exception as e:
-            log.error(f"Error: {e}")
-            raise
-
-    def add_torrent_file(self, torrent_data: bytes, filename: str) -> Dict:
-        """Agrega archivo .torrent"""
-        try:
-            log.info(f"📥 Agregando torrent...")
-            
-            # Guardar temporalmente
-            temp_path = Path("/tmp") / f"temp_{int(time.time())}.torrent"
-            temp_path.write_bytes(torrent_data)
-            
-            # Agregar torrent
-            self.client.download_from_file(
-                open(temp_path, 'rb'),
-                savepath=Config.QBIT_DOWNLOAD_DIR
-            )
-            
-            # Eliminar temporal
-            temp_path.unlink(missing_ok=True)
-            
-            # Esperar a que aparezca
-            time.sleep(1)
-            
-            torrents = self.client.torrents()
-            if torrents:
-                torrent = torrents[0]
-                torrent_id = torrent['hash']
-                name = torrent['name']
-                
-                with self.lock:
-                    self.torrents[torrent_id] = {
-                        "id": torrent_id,
-                        "name": name,
-                    }
-                
-                log.info(f"✓ Torrent: {name}")
-                
-                return {
-                    "torrent_id": torrent_id,
-                    "name": name,
-                }
-            
-        except Exception as e:
-            log.error(f"Error: {e}")
-            raise
-
-    def get_progress(self, torrent_id: str) -> Optional[Dict]:
-        """Obtiene progreso"""
-        try:
-            torrent = self.client.get_torrent(torrent_id)
-            
-            if not torrent:
-                return None
-            
-            return {
-                "name": torrent['name'],
-                "progress": torrent['progress'] * 100,
-                "downloaded": torrent['downloaded'],
-                "total": torrent['total_size'],
-                "speed": torrent['dl_speed'],
-                "eta": torrent['eta'],
-                "peers": torrent['num_seeds'],
-            }
-            
-        except:
-            return None
-
-    def get_files(self, torrent_id: str) -> List[str]:
-        """Obtiene archivos"""
-        try:
-            torrent = self.client.get_torrent(torrent_id)
-            
-            if not torrent:
-                return []
-            
-            files = []
-            download_dir = Path(Config.QBIT_DOWNLOAD_DIR)
-            
-            try:
-                file_list = self.client.get_torrent_files(torrent_id)
-                for file in file_list:
-                    file_path = download_dir / file['name']
-                    if file_path.exists() and file_path.stat().st_size > 0:
-                        files.append(str(file_path))
-            except:
-                # Si no funciona, buscar en directorio
-                for item in download_dir.rglob("*"):
-                    if item.is_file() and item.stat().st_size > 0:
-                        files.append(str(item))
-            
-            return files
-            
-        except:
-            return []
-
-    def remove_torrent(self, torrent_id: str, delete_data: bool = True):
-        """Elimina torrent"""
-        try:
-            if delete_data:
-                self.client.delete_permanently(torrent_id)
-            else:
-                self.client.delete(torrent_id)
-            
-            with self.lock:
-                if torrent_id in self.torrents:
-                    del self.torrents[torrent_id]
-            
-            log.info(f"✓ Torrent eliminado")
-            
-        except Exception as e:
-            log.warning(f"Error: {e}")
-
+# ═══ UTILIDADES ══════════════════════════════════════════════════════════════
+class Utils:
     @staticmethod
     def format_size(n: int) -> str:
-        """Formatea tamaño"""
+        """Formatea tamaño en bytes"""
         if n < 0:
             n = 0
         for u in ("B", "KB", "MB", "GB", "TB"):
             if n < 1024:
-                return f"{n:.1f} {u}"
+                return f"{n:.2f} {u}"
             n /= 1024
-        return f"{n:.1f} PB"
+        return f"{n:.2f} PB"
 
-    def close(self):
-        """Cierra"""
+    @staticmethod
+    def progress_bar(p: int) -> str:
+        """Crea barra de progreso"""
+        filled = min(int(p / 5), 20)
+        return "█" * filled + "░" * (20 - filled)
+
+    @staticmethod
+    def download_file(url: str, file_path: Path, callback=None) -> bool:
+        """Descarga archivo con progreso"""
         try:
-            if self.client:
-                self.client.logout()
-        except:
-            pass
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            start_time = time.time()
+            
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if callback and total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                            speed = downloaded / max(1, time.time() - start_time)
+                            callback({
+                                "progress": progress,
+                                "downloaded": downloaded,
+                                "total": total_size,
+                                "speed": speed,
+                            })
+            
+            return True
+            
+        except Exception as e:
+            log.error(f"Error descargando: {e}")
+            return False
 
 # ═══ BOT TELEGRAM ════════════════════════════════════════════════════════════
-class TorrentBot:
-    """Bot Telegram"""
+class TeleTorrentBot:
+    """Bot Telegram para descargar y subir archivos"""
 
     def __init__(self):
-        # Iniciar qBittorrent
-        QBitManager.start()
+        self.storage_path = Path(Config.STORAGE_PATH)
+        self.storage_path.mkdir(parents=True, exist_ok=True)
         
-        # Cliente qBittorrent
-        self.qbit = QBitClient()
+        self.cache_file = self.storage_path / "cache.json"
+        self.file_cache = self._load_cache()
         
-        # Control
         self.active_tasks: Dict = {}
         self.status_msgs: Dict = {}
         
-        # Cliente Telegram
         self.client = TelegramClient(
-            "bot_session",
+            "teletorrent_session",
             Config.API_ID,
             Config.API_HASH,
             connection_retries=5,
@@ -346,44 +114,95 @@ class TorrentBot:
         
         log.info("✅ Bot inicializado")
 
+    def _load_cache(self) -> dict:
+        """Carga caché de archivos"""
+        if self.cache_file.exists():
+            try:
+                return json.loads(self.cache_file.read_text())
+            except:
+                pass
+        return {}
+
+    def _save_cache(self):
+        """Guarda caché"""
+        try:
+            self.cache_file.write_text(json.dumps(self.file_cache, indent=2))
+        except Exception as e:
+            log.warning(f"Error guardando cache: {e}")
+
+    def _get_file_id(self, file_path: str) -> Optional[str]:
+        """Obtiene file_id del caché"""
+        if not os.path.exists(file_path):
+            return None
+        
+        try:
+            with open(file_path, "rb") as f:
+                md5 = hashlib.md5(f.read()).hexdigest()
+            
+            for e in self.file_cache.values():
+                if e.get("md5") == md5:
+                    return e.get("file_id")
+        except:
+            pass
+        
+        return None
+
+    def _cache_file_id(self, file_path: str, file_id: str):
+        """Guarda file_id en caché"""
+        if not os.path.exists(file_path):
+            return
+        
+        try:
+            with open(file_path, "rb") as f:
+                md5 = hashlib.md5(f.read()).hexdigest()
+            
+            self.file_cache[os.path.basename(file_path)] = {
+                "md5": md5,
+                "file_id": file_id,
+                "timestamp": time.time()
+            }
+            self._save_cache()
+        except:
+            pass
+
     async def start(self):
-        """Inicia bot"""
+        """Inicia el bot"""
         try:
             log.info("🔌 Conectando a Telegram...")
             await self.client.start(bot_token=Config.BOT_TOKEN)
             
             me = await self.client.get_me()
-            log.info(f"✓ Bot: @{me.username}")
+            log.info(f"✅ Bot: @{me.username} (ID: {me.id})")
             
             try:
                 ch = await self.client.get_entity(Config.CHANNEL_ID)
-                log.info(f"✓ Canal: {ch.title}")
+                log.info(f"✅ Canal: {ch.title}")
             except:
-                pass
+                log.warning("⚠️  Canal no accesible")
             
-            self._handlers()
+            self._register_handlers()
             
-            log.info("🔍 Escuchando...")
+            log.info("🔍 Escuchando mensajes...")
             await self.client.run_until_disconnected()
             
         except Exception as e:
             log.error(f"Error: {e}")
 
-    def _handlers(self):
-        """Handlers"""
+    def _register_handlers(self):
+        """Registra manejadores de eventos"""
         
         @self.client.on(events.NewMessage(pattern=r"^/start$|^/help$"))
         async def help_cmd(event):
             await event.reply(
-                "*🚀 TeleTorrent Bot v10.0*\n\n"
-                "qBittorrent integrado\n\n"
-                "*Comandos:*\n"
-                "/status - Ver progreso\n"
-                "/cancel - Cancelar\n\n"
-                "*Envía:*\n"
-                "• Magnet link\n"
-                "• Archivo .torrent\n"
-                "• URL .torrent",
+                "*🚀 TeleTorrent Bot v11.0*\n\n"
+                "Descarga archivos y sube a Telegram\n\n"
+                "*📋 Comandos:*\n"
+                "🔹 `/help` - Esta ayuda\n"
+                "🔹 `/status` - Ver progreso\n"
+                "🔹 `/cancel` - Cancelar\n\n"
+                "*💾 Tipos de descarga:*\n"
+                "• URLs HTTP/HTTPS\n"
+                "• Archivos adjuntos",
                 parse_mode="markdown"
             )
 
@@ -392,23 +211,26 @@ class TorrentBot:
             cid = event.chat_id
             
             if cid not in self.active_tasks:
-                await event.reply("*Sin descargas*")
+                await event.reply("*Sin descargas activas*", parse_mode="markdown")
                 return
             
-            tid = self.active_tasks[cid]
-            p = self.qbit.get_progress(tid)
+            task = self.active_tasks[cid]
+            p = task.get("progress_data")
             
             if not p:
+                await event.reply("*Descarga iniciando...*", parse_mode="markdown")
                 return
             
-            bar = self._bar(int(p["progress"]))
-            speed = QBitClient.format_size(int(p["speed"]))
-            eta = f"{int(p['eta'])}s" if p["eta"] > 0 else "∞"
+            bar = Utils.progress_bar(int(p["progress"]))
+            speed = Utils.format_size(int(p["speed"]))
+            down = Utils.format_size(p["downloaded"])
+            total = Utils.format_size(p["total"])
             
             await event.reply(
-                f"`{bar}` {p['progress']:.0f}%\n"
-                f"{speed}/s | ETA: {eta}\n"
-                f"🌱 {p['peers']} seeds"
+                f"`{bar}` {p['progress']:.1f}%\n"
+                f"📊 {speed}/s\n"
+                f"📥 {down} / {total}",
+                parse_mode="markdown"
             )
 
         @self.client.on(events.NewMessage(pattern=r"^/cancel$"))
@@ -416,11 +238,10 @@ class TorrentBot:
             cid = event.chat_id
             
             if cid not in self.active_tasks:
+                await event.reply("*Nada que cancelar*", parse_mode="markdown")
                 return
             
-            tid = self.active_tasks[cid]
-            self.qbit.remove_torrent(tid, delete_data=True)
-            
+            self.active_tasks[cid]["cancelled"] = True
             del self.active_tasks[cid]
             
             if cid in self.status_msgs:
@@ -429,6 +250,8 @@ class TorrentBot:
                 except:
                     pass
                 del self.status_msgs[cid]
+            
+            await event.reply("*Cancelado ✓*", parse_mode="markdown")
 
         @self.client.on(events.NewMessage)
         async def msg_handler(event):
@@ -437,197 +260,64 @@ class TorrentBot:
             if text.startswith("/"):
                 return
             
-            if text.startswith("magnet:"):
-                await self._magnet_download(event, text)
-                return
-            
-            if text.endswith(".torrent"):
-                await self._url_torrent_download(event, text)
+            if text.startswith(("http://", "https://", "ftp://")):
+                await self._download_url(event, text)
                 return
             
             if event.message.document:
-                await self._file_torrent(event)
+                await self._download_file(event)
 
-    async def _magnet_download(self, event, magnet: str):
-        """Descarga magnet"""
+    async def _download_url(self, event, url: str):
+        """Descarga URL"""
         cid = event.chat_id
         
         if cid in self.active_tasks:
-            await event.reply("*Ya hay descarga*")
+            await event.reply("*Ya hay descarga activa*", parse_mode="markdown")
             return
         
-        sm = await event.reply("*⏳ Procesando magnet...*")
+        sm = await event.reply("*⏳ Iniciando descarga...*", parse_mode="markdown")
         self.status_msgs[cid] = sm
         
         try:
-            info = self.qbit.add_magnet(magnet)
+            # Obtener nombre del archivo
+            filename = url.split("/")[-1].split("?")[0] or "descarga"
             
-            self.active_tasks[cid] = info["torrent_id"]
+            self.active_tasks[cid] = {
+                "filename": filename,
+                "cancelled": False,
+                "progress_data": None
+            }
             
-            await sm.edit(
-                f"*✅ {info['name'][:40]}*\n"
-                f"`{self._bar(0)}` 0%"
+            file_path = self.storage_path / filename
+            
+            def on_progress(data):
+                self.active_tasks[cid]["progress_data"] = data
+            
+            # Descargar
+            success = await asyncio.to_thread(
+                Utils.download_file,
+                url,
+                file_path,
+                on_progress
             )
             
-            asyncio.create_task(self._monitor(cid))
+            if not success:
+                await sm.edit("*❌ Error descargando*", parse_mode="markdown")
+                del self.active_tasks[cid]
+                return
+            
+            if self.active_tasks[cid]["cancelled"]:
+                file_path.unlink(missing_ok=True)
+                return
+            
+            await sm.edit("*✅ Descargado! Subiendo...*", parse_mode="markdown")
+            
+            # Subir a Telegram
+            await self._upload_file(cid, file_path)
             
         except Exception as e:
             log.error(f"Error: {e}")
-            await sm.edit("*❌ Error*")
-
-    async def _url_torrent_download(self, event, url: str):
-        """Descarga .torrent desde URL"""
-        cid = event.chat_id
-        
-        if cid in self.active_tasks:
-            await event.reply("*Ya hay descarga*")
-            return
-        
-        sm = await event.reply("*⏳ Descargando .torrent...*")
-        self.status_msgs[cid] = sm
-        
-        try:
-            r = requests.get(url, timeout=30)
-            if r.status_code != 200:
-                await sm.edit("*❌ Error*")
-                return
-            
-            filename = url.split("/")[-1]
-            info = self.qbit.add_torrent_file(r.content, filename)
-            
-            self.active_tasks[cid] = info["torrent_id"]
-            
-            await sm.edit(
-                f"*✅ {info['name'][:40]}*\n"
-                f"`{self._bar(0)}` 0%"
-            )
-            
-            asyncio.create_task(self._monitor(cid))
-            
-        except Exception as e:
-            log.error(f"Error: {e}")
-            await sm.edit("*❌ Error*")
-
-    async def _file_torrent(self, event):
-        """Archivo .torrent"""
-        if not event.message.document:
-            return
-        
-        cid = event.chat_id
-        fname = event.message.document.file_name or "torrent.torrent"
-        
-        if not fname.lower().endswith(".torrent"):
-            return
-        
-        if cid in self.active_tasks:
-            await event.reply("*Ya hay descarga*")
-            return
-        
-        sm = await event.reply("*⏳ Procesando...*")
-        self.status_msgs[cid] = sm
-        
-        try:
-            data = await event.message.download_media(bytes)
-            if not data:
-                await sm.edit("*❌ Error*")
-                return
-            
-            info = self.qbit.add_torrent_file(data, fname)
-            
-            self.active_tasks[cid] = info["torrent_id"]
-            
-            await sm.edit(
-                f"*✅ {info['name'][:40]}*\n"
-                f"`{self._bar(0)}` 0%"
-            )
-            
-            asyncio.create_task(self._monitor(cid))
-            
-        except Exception as e:
-            log.error(f"Error: {e}")
-            await sm.edit("*❌ Error*")
-
-    async def _monitor(self, cid: int):
-        """Monitorea"""
-        try:
-            if cid not in self.active_tasks:
-                return
-            
-            tid = self.active_tasks[cid]
-            last_p = -1
-            
-            while cid in self.active_tasks:
-                p = self.qbit.get_progress(tid)
-                
-                if not p:
-                    await asyncio.sleep(1)
-                    continue
-                
-                if int(p["progress"]) != last_p:
-                    last_p = int(p["progress"])
-                    
-                    bar = self._bar(int(p["progress"]))
-                    speed = QBitClient.format_size(int(p["speed"]))
-                    eta = f"{int(p['eta'])}s" if p["eta"] > 0 else "∞"
-                    
-                    try:
-                        if cid in self.status_msgs:
-                            await self.status_msgs[cid].edit(
-                                f"`{bar}` {p['progress']:.0f}%\n"
-                                f"{speed}/s | ETA: {eta}\n"
-                                f"🌱 {p['peers']}"
-                            )
-                    except:
-                        pass
-                
-                if p["progress"] >= 100:
-                    break
-                
-                await asyncio.sleep(1)
-            
-            # Upload
-            try:
-                await self.status_msgs[cid].edit("*✅ Subiendo...*")
-            except:
-                pass
-            
-            files = self.qbit.get_files(tid)
-            ok = 0
-            
-            for fpath in files[:5]:
-                try:
-                    fname = os.path.basename(fpath)
-                    
-                    await self.client.send_file(
-                        Config.CHANNEL_ID,
-                        file=fpath,
-                        caption=fname,
-                        force_document=True
-                    )
-                    
-                    try:
-                        os.remove(fpath)
-                        log.info(f"🗑️ Eliminado: {fname}")
-                    except:
-                        pass
-                    
-                    ok += 1
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    log.error(f"Upload: {e}")
-            
-            try:
-                await self.client.send_message(
-                    cid,
-                    f"*✅ {ok} archivo(s) subido(s)*"
-                )
-            except:
-                pass
-            
-            self.qbit.remove_torrent(tid, delete_data=True)
-            
-        except Exception as e:
-            log.error(f"Monitor: {e}")
+            await sm.edit(f"*❌ Error:* `{str(e)[:80]}`", parse_mode="markdown")
         finally:
             if cid in self.active_tasks:
                 del self.active_tasks[cid]
@@ -639,36 +329,136 @@ class TorrentBot:
                 if cid in self.status_msgs:
                     del self.status_msgs[cid]
 
-    @staticmethod
-    def _bar(p: int) -> str:
-        """Barra"""
-        filled = min(int(p / 5), 20)
-        return "█" * filled + "░" * (20 - filled)
+    async def _download_file(self, event):
+        """Descarga archivo adjunto"""
+        if not event.message.document:
+            return
+        
+        cid = event.chat_id
+        doc = event.message.document
+        filename = doc.file_name or "archivo"
+        
+        if cid in self.active_tasks:
+            await event.reply("*Ya hay descarga activa*", parse_mode="markdown")
+            return
+        
+        sm = await event.reply("*⏳ Descargando archivo...*", parse_mode="markdown")
+        self.status_msgs[cid] = sm
+        
+        try:
+            file_path = self.storage_path / filename
+            
+            self.active_tasks[cid] = {
+                "filename": filename,
+                "cancelled": False
+            }
+            
+            await event.message.download_media(str(file_path))
+            
+            if self.active_tasks[cid]["cancelled"]:
+                file_path.unlink(missing_ok=True)
+                return
+            
+            await sm.edit("*✅ Descargado! Subiendo...*", parse_mode="markdown")
+            await self._upload_file(cid, file_path)
+            
+        except Exception as e:
+            log.error(f"Error: {e}")
+            await sm.edit(f"*❌ Error:* `{str(e)[:80]}`", parse_mode="markdown")
+        finally:
+            if cid in self.active_tasks:
+                del self.active_tasks[cid]
+            if cid in self.status_msgs:
+                try:
+                    await self.status_msgs[cid].delete()
+                except:
+                    pass
+                if cid in self.status_msgs:
+                    del self.status_msgs[cid]
+
+    async def _upload_file(self, cid, file_path: Path):
+        """Sube archivo a Telegram"""
+        try:
+            if not file_path.exists():
+                await self.client.send_message(cid, "*❌ Archivo no encontrado*", parse_mode="markdown")
+                return
+            
+            filename = file_path.name
+            file_size = file_path.stat().st_size
+            
+            log.info(f"📤 Subiendo: {filename} ({Utils.format_size(file_size)})")
+            
+            # Intentar usar caché
+            cached_id = self._get_file_id(str(file_path))
+            
+            if cached_id:
+                try:
+                    await self.client.send_file(
+                        Config.CHANNEL_ID,
+                        file=cached_id,
+                        caption=filename,
+                        force_document=True
+                    )
+                    await self.client.send_message(cid, f"*✅ Subido:* `{filename}`", parse_mode="markdown")
+                    file_path.unlink(missing_ok=True)
+                    log.info(f"✓ {filename} (desde caché)")
+                    return
+                except:
+                    pass
+            
+            # Subir archivo nuevo
+            response = await self.client.send_file(
+                Config.CHANNEL_ID,
+                file=str(file_path),
+                caption=filename,
+                force_document=True
+            )
+            
+            if response and hasattr(response, "media"):
+                if hasattr(response.media, "document"):
+                    self._cache_file_id(str(file_path), str(response.media.document.id))
+            
+            # Eliminar archivo local
+            try:
+                file_path.unlink()
+                log.info(f"✓ {filename} subido y eliminado")
+            except:
+                log.info(f"✓ {filename} subido")
+            
+            await self.client.send_message(
+                cid,
+                f"*✅ Subido correctamente:* `{filename}`",
+                parse_mode="markdown"
+            )
+            
+        except Exception as e:
+            log.error(f"Error subiendo: {e}")
+            await self.client.send_message(cid, f"*❌ Error subiendo:* `{str(e)[:80]}`", parse_mode="markdown")
 
     async def stop(self):
-        """Detiene"""
+        """Detiene el bot"""
         log.info("🛑 Deteniendo...")
-        self.qbit.close()
         await self.client.disconnect()
-        QBitManager.stop()
+        log.info("✓ Bot detenido")
 
 # ═══ MAIN ════════════════════════════════════════════════════════════════════
 async def main(bot):
     try:
         await bot.start()
     except KeyboardInterrupt:
-        pass
+        log.info("Interrupción del usuario")
     finally:
         await bot.stop()
 
 if __name__ == "__main__":
     log.info("=" * 70)
-    log.info("🚀 TeleTorrent Bot v10.0 - QBITTORRENT")
+    log.info("🚀 TeleTorrent Bot v11.0 - INICIANDO")
     log.info("=" * 70)
     
-    bot = TorrentBot()
+    bot = TeleTorrentBot()
     
     def signal_handler(signum, frame):
+        log.info("Señal recibida, cerrando...")
         asyncio.create_task(bot.stop())
         sys.exit(0)
     
@@ -678,5 +468,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main(bot))
     except Exception as e:
-        log.error(f"Error: {e}")
+        log.error(f"Error fatal: {e}")
         sys.exit(1)
