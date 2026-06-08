@@ -75,7 +75,7 @@ func (m *MTProtoClient) Start(chatID int64) error {
 			fmt.Print("\n=== MTProto Authentication ===\n")
 			reader := bufio.NewReader(os.Stdin)
 
-			fmt.Print("Enter phone number (e.g., +1234567890): ")
+			fmt.Print("Enter phone number: ")
 			phone, _ := reader.ReadString('\n')
 			phone = strings.TrimSpace(phone)
 			if phone == "" {
@@ -96,7 +96,7 @@ func (m *MTProtoClient) Start(chatID int64) error {
 				return fmt.Errorf("unexpected: %T", sentCode)
 			}
 
-			fmt.Print("Enter verification code (sent to Telegram): ")
+			fmt.Print("Enter verification code: ")
 			code, _ := reader.ReadString('\n')
 			code = strings.TrimSpace(code)
 			if code == "" {
@@ -152,7 +152,6 @@ func (m *MTProtoClient) WaitReady() bool {
 
 func (m *MTProtoClient) resolvePeer(ctx context.Context, chatID int64) (tg.InputPeerClass, error) {
 	api := m.client.API()
-	// First try: get from dialogs
 	dialogs, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{Limit: 100})
 	if err == nil {
 		switch d := dialogs.(type) {
@@ -170,7 +169,6 @@ func (m *MTProtoClient) resolvePeer(ctx context.Context, chatID int64) (tg.Input
 			}
 		}
 	}
-	// Second try: ChannelsGetChannels (correct API)
 	channels, err2 := api.ChannelsGetChannels(ctx, []tg.InputChannelClass{
 		&tg.InputChannel{ChannelID: chatID, AccessHash: 0},
 	})
@@ -223,6 +221,7 @@ func (m *MTProtoClient) SendLargeFile(filePath, fileName string, replyTo int) er
 }
 
 func (m *MTProtoClient) IsAuthed() bool { return m.authed }
+
 func (m *MTProtoClient) Close() {
 	if m.cancel != nil {
 		m.cancel()
@@ -245,4 +244,3 @@ func (s *sessionStorage) LoadSession(ctx context.Context) ([]byte, error) {
 func (s *sessionStorage) StoreSession(ctx context.Context, data []byte) error {
 	return os.WriteFile(s.path, data, 0600)
 }
-GOEOF
