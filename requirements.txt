@@ -1,4 +1,3 @@
 telethon==1.36.0
 requests==2.31.0
-python-libtorrent==2.0.11
-bencodepy==0.1.4
+bencodepy==0.9.5
