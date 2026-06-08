@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-🚀 TeleTorrent Bot v13.0 - VERSIÓN ROBUSTA Y DEFINITIVA
-Descarga magnet links, torrents y URLs HTTP/HTTPS
-Sube archivos a Telegram automáticamente
-A prueba de fallos con manejo exhaustivo de errores
+🚀 TeleTorrent Bot v14.0
+- Progreso real de descarga Y subida
+- Conversión automática de video para Telegram (reproducible)
+- Soporte magnet, torrents, URLs HTTP
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
 import signal
-import sys
 import subprocess
-import tempfile
+import sys
 import time
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -30,7 +31,7 @@ from telethon.errors import (
     MessageIdInvalidError,
     ChatWriteForbiddenError,
 )
-from telethon.tl.types import DocumentAttributeFilename
+from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeVideo
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
@@ -38,16 +39,28 @@ from telethon.tl.types import DocumentAttributeFilename
 class Config:
     API_ID          = 34280578
     API_HASH        = "b77ac49b31b12365b98f2333bd4c3eb0"
-    BOT_TOKEN       = "8835976877:AAHZyBbv_6MmVSnQ5rdM4Csq8Qjrb3Zjy60"
+    BOT_TOKEN       = "8835976877:AAESuq6cKUvWOnwOCfn-I0Xb3zx_raJgYMQ"  # ← NUEVO TOKEN
     CHANNEL_ID      = -1003213143951
     STORAGE_PATH    = "./downloads"
     ARIA2_PORT      = 6800
-    ARIA2_SECRET    = ""                  # Opcional: token RPC
-    MAX_RETRIES     = 5
-    UPDATE_INTERVAL = 5                   # Segundos entre actualizaciones
-    MAX_FILE_SIZE   = 2 * 1024**3         # 2 GB límite Telegram
-    ARIA2_TIMEOUT   = 30                  # Timeout para operaciones aria2
-    MONITOR_TIMEOUT = 7200               # 2 horas máximo de descarga
+    ARIA2_SECRET    = ""
+    UPDATE_INTERVAL = 4           # segundos entre updates de progreso
+    MAX_FILE_SIZE   = 2 * 1024**3 # 2 GB
+    MONITOR_TIMEOUT = 7200        # 2 horas máx descarga
+    MAX_STALL_TIME  = 600         # 10 min sin progreso
+
+    # Video
+    VIDEO_EXTENSIONS = {
+        ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv",
+        ".webm", ".m4v", ".ts", ".m2ts", ".mpeg", ".mpg",
+        ".3gp", ".ogv", ".divx", ".xvid", ".rmvb", ".rm"
+    }
+    # Formatos ya compatibles con Telegram (no necesitan conversión)
+    TELEGRAM_NATIVE = {".mp4"}
+    # CRF para conversión (18=alta calidad, 28=menor tamaño)
+    VIDEO_CRF       = 23
+    # Preset ffmpeg (ultrafast/fast/medium/slow)
+    VIDEO_PRESET    = "fast"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOGGING
@@ -57,14 +70,13 @@ def setup_logging() -> logging.Logger:
         "%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     )
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(fmt)
-
     logger = logging.getLogger("TeleTorrent")
     logger.setLevel(logging.INFO)
-    logger.addHandler(handler)
 
-    # Log a archivo también
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)
+
     fh = logging.FileHandler("teletorrent.log", encoding="utf-8")
     fh.setFormatter(fmt)
     logger.addHandler(fh)
@@ -77,16 +89,13 @@ log = setup_logging()
 # UTILIDADES
 # ═══════════════════════════════════════════════════════════════════════════════
 class Utils:
+
     @staticmethod
     def format_size(n) -> str:
-        """Formatea bytes a unidad legible"""
         try:
-            n = float(n) if n else 0.0
-            if n < 0:
-                n = 0.0
-        except (TypeError, ValueError):
+            n = max(0.0, float(n or 0))
+        except:
             n = 0.0
-
         for unit in ("B", "KB", "MB", "GB", "TB"):
             if n < 1024.0:
                 return f"{n:.2f} {unit}"
@@ -95,29 +104,24 @@ class Utils:
 
     @staticmethod
     def format_speed(bps) -> str:
-        """Formatea velocidad"""
         return f"{Utils.format_size(bps)}/s"
 
     @staticmethod
     def format_eta(seconds) -> str:
-        """Formatea tiempo restante"""
         try:
-            seconds = int(seconds)
-            if seconds <= 0 or seconds > 86400 * 7:
+            s = int(seconds)
+            if s <= 0 or s > 86400 * 7:
                 return "∞"
-            h, rem = divmod(seconds, 3600)
-            m, s   = divmod(rem, 60)
-            if h > 0:
-                return f"{h}h {m}m"
-            if m > 0:
-                return f"{m}m {s}s"
-            return f"{s}s"
+            h, r = divmod(s, 3600)
+            m, s = divmod(r, 60)
+            if h:   return f"{h}h {m}m"
+            if m:   return f"{m}m {s}s"
+            return  f"{s}s"
         except:
             return "∞"
 
     @staticmethod
     def progress_bar(p: float, width: int = 20) -> str:
-        """Genera barra de progreso"""
         try:
             p = min(100.0, max(0.0, float(p)))
         except:
@@ -127,31 +131,22 @@ class Utils:
 
     @staticmethod
     def sanitize_filename(name: str) -> str:
-        """Limpia nombre de archivo"""
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
-        name = name.strip(". ")
-        return name[:200] or "descarga"
+        return name.strip(". ")[:200] or "descarga"
 
     @staticmethod
-    def get_file_md5(fp: str) -> Optional[str]:
-        """Calcula MD5 de archivo"""
+    def get_md5(fp: str) -> Optional[str]:
         try:
             h = hashlib.md5()
             with open(fp, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
+                for chunk in iter(lambda: f.read(65536), b""):
                     h.update(chunk)
             return h.hexdigest()
         except:
             return None
 
     @staticmethod
-    def is_torrent_file(data: bytes) -> bool:
-        """Verifica si los bytes son un archivo .torrent válido"""
-        return data[:2] in (b"d8", b"d6") or data[:1] == b"d"
-
-    @staticmethod
     def extract_name_from_magnet(magnet: str) -> str:
-        """Extrae nombre del magnet link"""
         dn = re.search(r"[?&]dn=([^&]+)", magnet)
         if dn:
             try:
@@ -159,364 +154,406 @@ class Utils:
             except:
                 pass
         ih = re.search(r"xt=urn:btih:([a-fA-F0-9]{40}|[A-Z2-7]{32})", magnet)
-        if ih:
-            return f"Torrent_{ih.group(1)[:8]}"
-        return "Descarga_Magnet"
+        return f"Torrent_{ih.group(1)[:8]}" if ih else "Descarga_Magnet"
+
+    @staticmethod
+    def is_video(fp: str) -> bool:
+        return Path(fp).suffix.lower() in Config.VIDEO_EXTENSIONS
+
+    @staticmethod
+    def needs_conversion(fp: str) -> bool:
+        """True si el video necesita conversión para Telegram"""
+        suffix = Path(fp).suffix.lower()
+        if suffix not in Config.VIDEO_EXTENSIONS:
+            return False
+        if suffix not in Config.TELEGRAM_NATIVE:
+            return True
+        # MP4 puede necesitar conversión si el codec no es H264/AAC
+        return False  # los mp4 los intentamos directo primero
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ARIA2 RPC CLIENT - ROBUSTO
+# CONVERSOR DE VIDEO
+# ═══════════════════════════════════════════════════════════════════════════════
+class VideoConverter:
+    """Convierte videos a MP4 H264/AAC compatible con Telegram"""
+
+    @staticmethod
+    def ffmpeg_available() -> bool:
+        return shutil.which("ffmpeg") is not None
+
+    @staticmethod
+    def get_video_info(fp: str) -> dict:
+        """Obtiene info del video con ffprobe"""
+        try:
+            cmd = [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams", "-show_format",
+                fp
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                info = {"duration": 0, "width": 0, "height": 0,
+                        "vcodec": "", "acodec": ""}
+
+                fmt = data.get("format", {})
+                info["duration"] = int(float(fmt.get("duration", 0)))
+
+                for stream in data.get("streams", []):
+                    if stream.get("codec_type") == "video":
+                        info["width"]  = stream.get("width", 0)
+                        info["height"] = stream.get("height", 0)
+                        info["vcodec"] = stream.get("codec_name", "")
+                    elif stream.get("codec_type") == "audio":
+                        info["acodec"] = stream.get("codec_name", "")
+
+                return info
+        except Exception as e:
+            log.warning(f"ffprobe error: {e}")
+        return {"duration": 0, "width": 0, "height": 0, "vcodec": "", "acodec": ""}
+
+    @staticmethod
+    async def convert(
+        fp: str,
+        progress_callback=None
+    ) -> Optional[str]:
+        """
+        Convierte video a MP4 H264/AAC.
+        progress_callback(percent: float, speed: str, eta: str)
+        Retorna ruta del archivo convertido o None si falla.
+        """
+        if not VideoConverter.ffmpeg_available():
+            log.error("❌ ffmpeg no instalado")
+            return None
+
+        src  = Path(fp)
+        dst  = src.with_suffix(".converted.mp4")
+
+        # Obtener info para thumbnail y duración
+        info = VideoConverter.get_video_info(fp)
+        log.info(
+            f"🎬 Convirtiendo: {src.name} "
+            f"({info['width']}x{info['height']}, "
+            f"{info['vcodec']}/{info['acodec']}, "
+            f"{Utils.format_eta(info['duration'])})"
+        )
+
+        # Comando ffmpeg con progreso
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(src),
+            # Video: H264 con CRF
+            "-c:v", "libx264",
+            "-crf", str(Config.VIDEO_CRF),
+            "-preset", Config.VIDEO_PRESET,
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-pix_fmt", "yuv420p",   # Compatibilidad máxima
+            # Audio: AAC
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ac", "2",
+            # Metadatos para Telegram
+            "-movflags", "+faststart",  # Streaming inmediato
+            # Progreso
+            "-progress", "pipe:1",
+            "-nostats",
+            str(dst)
+        ]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            duration_secs = info["duration"] or 1
+            last_time     = 0.0
+
+            # Leer progreso de stdout (ffmpeg -progress pipe:1)
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(), timeout=60
+                    )
+                except asyncio.TimeoutError:
+                    log.warning("ffmpeg sin salida por 60s")
+                    break
+
+                if not line:
+                    break
+
+                line = line.decode("utf-8", errors="ignore").strip()
+
+                if line.startswith("out_time_ms="):
+                    try:
+                        ms       = int(line.split("=")[1])
+                        cur_secs = ms / 1_000_000
+                        percent  = min(99.0, (cur_secs / duration_secs) * 100)
+
+                        if progress_callback and abs(cur_secs - last_time) >= 2:
+                            last_time = cur_secs
+                            remaining = duration_secs - cur_secs
+                            await progress_callback(percent, remaining)
+
+                    except:
+                        pass
+
+                if line == "progress=end":
+                    break
+
+            await proc.wait()
+
+            if proc.returncode != 0:
+                stderr = await proc.stderr.read()
+                log.error(f"ffmpeg error:\n{stderr.decode(errors='ignore')[-500:]}")
+                if dst.exists():
+                    dst.unlink()
+                return None
+
+            if not dst.exists() or dst.stat().st_size == 0:
+                log.error("ffmpeg: archivo de salida vacío")
+                return None
+
+            log.info(f"✅ Conversión completada: {dst.name} ({Utils.format_size(dst.stat().st_size)})")
+
+            # Eliminar original
+            try:
+                src.unlink()
+            except:
+                pass
+
+            return str(dst)
+
+        except Exception as e:
+            log.error(f"Error en conversión: {e}", exc_info=True)
+            if dst.exists():
+                try: dst.unlink()
+                except: pass
+            return None
+
+    @staticmethod
+    def generate_thumbnail(fp: str) -> Optional[str]:
+        """Genera miniatura del video"""
+        try:
+            info   = VideoConverter.get_video_info(fp)
+            dur    = info["duration"]
+            ts     = min(dur * 0.1, 10) if dur > 0 else 1  # 10% o 10s
+
+            thumb  = str(Path(fp).with_suffix(".thumb.jpg"))
+            cmd    = [
+                "ffmpeg", "-y",
+                "-ss", str(ts),
+                "-i", fp,
+                "-vframes", "1",
+                "-vf", "scale=320:-1",
+                "-q:v", "5",
+                thumb
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=30)
+            if result.returncode == 0 and os.path.exists(thumb):
+                return thumb
+        except Exception as e:
+            log.warning(f"Thumbnail error: {e}")
+        return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARIA2 RPC
 # ═══════════════════════════════════════════════════════════════════════════════
 class Aria2RPC:
-    """Cliente JSON-RPC para aria2 con reconexión automática"""
 
-    def __init__(self, port: int = Config.ARIA2_PORT, secret: str = Config.ARIA2_SECRET):
-        self.port    = port
-        self.secret  = secret
-        self.url     = f"http://127.0.0.1:{port}/jsonrpc"
-        self._req_id = 0
+    def __init__(self):
+        self.url     = f"http://127.0.0.1:{Config.ARIA2_PORT}/jsonrpc"
+        self._id     = 0
         self.ready   = False
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
 
     def wait_ready(self, max_attempts: int = 40) -> bool:
-        """Espera a que aria2 RPC esté disponible"""
         log.info("⏳ Esperando aria2 RPC...")
         for i in range(max_attempts):
             try:
                 r = self.session.post(
                     self.url,
-                    json={"jsonrpc": "2.0", "id": 0, "method": "aria2.getVersion", "params": []},
+                    json={"jsonrpc":"2.0","id":0,"method":"aria2.getVersion","params":[]},
                     timeout=3
                 )
-                if r.status_code == 200:
-                    data = r.json()
-                    if "result" in data:
-                        ver = data["result"].get("version", "?")
-                        log.info(f"✓ aria2 RPC listo (v{ver})")
-                        self.ready = True
-                        return True
-            except Exception:
+                if r.status_code == 200 and "result" in r.json():
+                    ver = r.json()["result"].get("version","?")
+                    log.info(f"✓ aria2 RPC listo (v{ver})")
+                    self.ready = True
+                    return True
+            except:
                 pass
             time.sleep(1)
-            if i % 5 == 4:
-                log.info(f"  ...intentando ({i+1}/{max_attempts})")
-
+            if i % 10 == 9:
+                log.info(f"  aria2 RPC... ({i+1}/{max_attempts})")
         log.error("❌ aria2 RPC no responde")
         return False
 
-    def _build_params(self, params: list) -> list:
-        """Agrega token de autenticación si está configurado"""
-        if self.secret:
-            return [f"token:{self.secret}"] + params
-        return params
-
-    def _call(self, method: str, params: list = None, retries: int = 3) -> Optional[any]:
-        """Llamada JSON-RPC con reintentos"""
+    def _call(self, method: str, params: list = None, retries: int = 3):
         params = params or []
-        full_params = self._build_params(params)
+        if Config.ARIA2_SECRET:
+            params = [f"token:{Config.ARIA2_SECRET}"] + params
 
         for attempt in range(retries):
             try:
-                self._req_id += 1
-                payload = {
-                    "jsonrpc": "2.0",
-                    "id":      self._req_id,
-                    "method":  method,
-                    "params":  full_params
-                }
-
-                r = self.session.post(self.url, json=payload, timeout=Config.ARIA2_TIMEOUT)
-
-                if r.status_code != 200:
-                    log.warning(f"aria2 HTTP {r.status_code}")
-                    continue
-
-                data = r.json()
-
-                if "error" in data:
-                    err = data["error"]
-                    log.warning(f"aria2 error [{method}]: {err.get('message', err)}")
-                    return None
-
-                return data.get("result")
-
+                self._id += 1
+                r = self.session.post(
+                    self.url,
+                    json={"jsonrpc":"2.0","id":self._id,"method":method,"params":params},
+                    timeout=30
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    if "error" in data:
+                        log.warning(f"aria2 [{method}]: {data['error'].get('message','?')}")
+                        return None
+                    return data.get("result")
             except requests.exceptions.ConnectionError:
                 if attempt < retries - 1:
-                    log.warning(f"aria2 desconectado, reintento {attempt+1}/{retries}...")
                     time.sleep(2)
-                    self.ready = False
                     self.wait_ready(10)
-                else:
-                    log.error("aria2 RPC no disponible")
-            except requests.exceptions.Timeout:
-                log.warning(f"aria2 timeout [{method}]")
             except Exception as e:
                 log.warning(f"aria2 excepción [{method}]: {e}")
-
         return None
 
-    def add_uri(self, uris: List[str], options: dict = None) -> Optional[str]:
-        """Agrega URIs (magnet, http, etc.). Retorna GID"""
+    def add_uri(self, uris: list, opts: dict = None) -> Optional[str]:
         params = [uris]
-        if options:
-            params.append({k: str(v) for k, v in options.items()})
-        result = self._call("aria2.addUri", params)
-        if isinstance(result, str) and result:
-            log.info(f"✓ aria2 GID={result}")
-            return result
-        log.error(f"add_uri falló: {result}")
-        return None
+        if opts:
+            params.append({k: str(v) for k, v in opts.items()})
+        r = self._call("aria2.addUri", params)
+        return r if isinstance(r, str) else None
 
-    def add_torrent(self, torrent_b64: str, options: dict = None) -> Optional[str]:
-        """Agrega archivo .torrent en base64. Retorna GID"""
-        import base64
-        params = [torrent_b64, [], options or {}]
-        result = self._call("aria2.addTorrent", params)
-        if isinstance(result, str) and result:
-            log.info(f"✓ aria2 torrent GID={result}")
-            return result
-        return None
+    def add_torrent(self, b64: str, opts: dict = None) -> Optional[str]:
+        r = self._call("aria2.addTorrent", [b64, [], opts or {}])
+        return r if isinstance(r, str) else None
 
     def get_status(self, gid: str) -> Optional[dict]:
-        """Estado de una descarga"""
-        keys = [
-            "gid", "status", "totalLength", "completedLength",
-            "downloadSpeed", "uploadSpeed", "files", "bittorrent",
-            "errorCode", "errorMessage", "followedBy"
-        ]
-        result = self._call("aria2.tellStatus", [gid, keys])
-        return result if isinstance(result, dict) else None
+        keys = ["gid","status","totalLength","completedLength",
+                "downloadSpeed","uploadSpeed","files","bittorrent",
+                "errorCode","errorMessage"]
+        r = self._call("aria2.tellStatus", [gid, keys])
+        return r if isinstance(r, dict) else None
 
-    def remove(self, gid: str) -> bool:
-        """Cancela y elimina descarga"""
-        # Intentar pausa primero, luego remove
-        self._call("aria2.pause", [gid])
-        time.sleep(0.5)
-        r = self._call("aria2.remove", [gid])
-        if r is None:
-            r = self._call("aria2.forceRemove", [gid])
-        return r is not None
-
-    def purge(self, gid: str):
-        """Elimina del historial"""
+    def remove(self, gid: str):
+        self._call("aria2.pause",       [gid])
+        time.sleep(0.3)
+        self._call("aria2.remove",      [gid])
+        self._call("aria2.forceRemove", [gid])
         self._call("aria2.removeDownloadResult", [gid])
 
-    def get_version(self) -> Optional[str]:
-        """Obtiene versión de aria2"""
-        r = self._call("aria2.getVersion")
-        return r.get("version") if isinstance(r, dict) else None
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# GESTOR ARIA2C
+# ARIA2 MANAGER
 # ═══════════════════════════════════════════════════════════════════════════════
 class Aria2Manager:
-    """Gestiona el proceso aria2c"""
 
     @staticmethod
     def kill_existing():
-        """Mata cualquier proceso aria2c existente"""
         try:
-            result = subprocess.run(
-                ["pgrep", "-f", "aria2c"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.stdout.strip():
-                subprocess.run(["pkill", "-9", "-f", "aria2c"], timeout=5)
-                time.sleep(1.5)
-                log.info("✓ Procesos aria2c anteriores eliminados")
-        except Exception:
+            subprocess.run(["pkill","-9","-f","aria2c"], timeout=5)
+            time.sleep(1.5)
+        except:
             pass
 
     @staticmethod
-    def check_installed() -> bool:
-        """Verifica que aria2c esté instalado"""
-        return shutil.which("aria2c") is not None
-
-    @staticmethod
     def is_running() -> bool:
-        """Verifica si aria2c está corriendo"""
         try:
-            r = subprocess.run(["pgrep", "-f", "aria2c"], capture_output=True, timeout=5)
-            return r.returncode == 0
+            return subprocess.run(
+                ["pgrep","-f","aria2c"], capture_output=True, timeout=5
+            ).returncode == 0
         except:
             return False
 
     @staticmethod
-    def start(storage_path: str) -> bool:
-        """Inicia aria2c daemon con configuración óptima"""
-        if not Aria2Manager.check_installed():
-            log.error("❌ aria2c no instalado. Ejecuta: sudo apt-get install -y aria2")
+    def start(storage: str) -> bool:
+        if not shutil.which("aria2c"):
+            log.error("❌ aria2c no instalado: sudo apt-get install -y aria2")
             return False
 
         Aria2Manager.kill_existing()
-
-        sp = Path(storage_path).absolute()
+        sp = Path(storage).absolute()
         sp.mkdir(parents=True, exist_ok=True)
 
-        session_file = sp / "aria2_session.dat"
-        log_file     = sp / "aria2_daemon.log"
+        session = sp / "aria2.session"
+        session.touch()
 
-        # Configuración aria2c completa y robusta
         cmd = [
             "aria2c",
-            # RPC
             "--enable-rpc=true",
             "--rpc-listen-all=true",
             f"--rpc-listen-port={Config.ARIA2_PORT}",
             "--rpc-allow-origin-all=true",
-            "--rpc-save-upload-metadata=true",
-            # Directorio
             f"--dir={sp}",
-            # Conexiones
             "--max-concurrent-downloads=5",
             "--max-connection-per-server=8",
-            "--min-split-size=5M",
             "--split=8",
+            "--min-split-size=5M",
             "--max-tries=10",
             "--retry-wait=5",
             "--connect-timeout=30",
             "--timeout=60",
-            # Rendimiento
             "--continue=true",
             "--allow-overwrite=true",
             "--auto-file-renaming=false",
             "--disk-cache=64M",
-            "--file-allocation=none",           # más compatible
-            # BitTorrent
+            "--file-allocation=none",
             "--enable-dht=true",
-            "--enable-dht6=false",
             "--enable-peer-exchange=true",
             "--bt-enable-lpd=true",
             "--bt-max-peers=100",
-            "--bt-request-peer-speed-limit=10M",
-            "--seed-time=0",                    # No seedear
-            "--bt-stop-timeout=300",            # 5 min sin peers = parar
+            "--seed-time=0",
+            "--bt-stop-timeout=300",
             "--follow-torrent=mem",
-            # Sesión
-            f"--save-session={session_file}",
+            f"--save-session={session}",
             "--save-session-interval=30",
-            # Daemon y logs
+            f"--input-file={session}",
             "--daemon=true",
-            "--quiet=false",
-            f"--log={log_file}",
+            f"--log={sp / 'aria2.log'}",
             "--log-level=notice",
         ]
 
-        # Agregar secret si está configurado
-        if Config.ARIA2_SECRET:
-            cmd.append(f"--rpc-secret={Config.ARIA2_SECRET}")
-
-        # Cargar sesión anterior si existe
-        if session_file.exists() and session_file.stat().st_size > 0:
-            cmd.append(f"--input-file={session_file}")
-
-        log.info("🚀 Iniciando aria2c daemon...")
-
+        log.info("🚀 Iniciando aria2c...")
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-                text=True
-            )
-
-            # Esperar inicio
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
             time.sleep(2)
-
-            if not Aria2Manager.is_running():
-                stderr = proc.stderr.read() if proc.stderr else ""
-                log.error(f"❌ aria2c falló: {stderr[:300]}")
-                return False
-
-            log.info(f"✓ aria2c iniciado correctamente")
-            return True
-
+            if Aria2Manager.is_running():
+                log.info("✓ aria2c corriendo")
+                return True
+            log.error("❌ aria2c no inició")
+            return False
         except FileNotFoundError:
             log.error("❌ aria2c no encontrado")
             return False
         except Exception as e:
-            log.error(f"❌ Error iniciando aria2c: {e}")
+            log.error(f"❌ aria2c: {e}")
             return False
 
     @staticmethod
     def stop():
-        """Detiene aria2c limpiamente"""
         try:
-            subprocess.run(["pkill", "-SIGTERM", "-f", "aria2c"], timeout=5)
+            subprocess.run(["pkill","-SIGTERM","-f","aria2c"], timeout=5)
             time.sleep(2)
             if Aria2Manager.is_running():
-                subprocess.run(["pkill", "-9", "-f", "aria2c"], timeout=5)
-            log.info("✓ aria2c detenido")
+                subprocess.run(["pkill","-9","-f","aria2c"], timeout=5)
         except:
             pass
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# CACHÉ DE ARCHIVOS
-# ═══════════════════════════════════════════════════════════════════════════════
-class FileCache:
-    """Caché persistente de file_ids de Telegram"""
-
-    def __init__(self, cache_file: Path):
-        self.cache_file = cache_file
-        self._data: dict = self._load()
-
-    def _load(self) -> dict:
-        if self.cache_file.exists():
-            try:
-                return json.loads(self.cache_file.read_text(encoding="utf-8"))
-            except:
-                pass
-        return {}
-
-    def save(self):
-        try:
-            self.cache_file.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False),
-                encoding="utf-8"
-            )
-        except Exception as e:
-            log.warning(f"Error guardando caché: {e}")
-
-    def get_file_id(self, md5: str) -> Optional[str]:
-        entry = self._data.get(md5)
-        if entry and isinstance(entry, dict):
-            return entry.get("file_id")
-        return None
-
-    def set_file_id(self, md5: str, file_id: str, filename: str):
-        self._data[md5] = {
-            "file_id":   file_id,
-            "filename":  filename,
-            "timestamp": time.time()
-        }
-        self.save()
-
-    def cleanup_old(self, days: int = 30):
-        """Limpia entradas viejas"""
-        cutoff = time.time() - (days * 86400)
-        old_keys = [k for k, v in self._data.items()
-                    if isinstance(v, dict) and v.get("timestamp", 0) < cutoff]
-        for k in old_keys:
-            del self._data[k]
-        if old_keys:
-            self.save()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAREA DE DESCARGA
 # ═══════════════════════════════════════════════════════════════════════════════
 class DownloadTask:
-    """Representa una tarea de descarga activa"""
-
     def __init__(self, gid: str, name: str, chat_id: int, source: str = ""):
         self.gid          = gid
         self.name         = name
         self.chat_id      = chat_id
         self.source       = source
         self.started_at   = time.time()
-        self.status_msg   = None          # Mensaje de Telegram para actualizar
-        self.monitor_task = None          # asyncio.Task del monitor
-        self.files        = []            # Archivos descargados
+        self.status_msg   = None
+        self.monitor_task = None
 
     @property
     def elapsed(self) -> float:
@@ -529,183 +566,143 @@ class DownloadTask:
 # BOT PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════════════
 class TeleTorrentBot:
-    """Bot Telegram robusto para descarga de torrents y archivos"""
 
     def __init__(self):
-        self.storage_path = Path(Config.STORAGE_PATH).absolute()
-        self.storage_path.mkdir(parents=True, exist_ok=True)
+        self.storage = Path(Config.STORAGE_PATH).absolute()
+        self.storage.mkdir(parents=True, exist_ok=True)
 
-        self.cache       = FileCache(self.storage_path / "cache.json")
         self.aria2: Optional[Aria2RPC] = None
-        self.tasks: Dict[int, DownloadTask] = {}   # chat_id → DownloadTask
+        self.tasks: Dict[int, DownloadTask] = {}
 
         self.client = TelegramClient(
-            str(self.storage_path / "teletorrent_session"),
+            str(self.storage / "session"),
             Config.API_ID,
             Config.API_HASH,
             connection_retries=10,
             retry_delay=5,
             timeout=30,
-            request_retries=5,
         )
 
-        log.info("✓ TeleTorrentBot inicializado")
+        # Verificar ffmpeg
+        if VideoConverter.ffmpeg_available():
+            log.info("✓ ffmpeg disponible — conversión de video activa")
+        else:
+            log.warning("⚠️ ffmpeg NO disponible — videos sin conversión")
+            log.warning("   Instala: sudo apt-get install -y ffmpeg")
 
     # ─── INICIO ──────────────────────────────────────────────────────────────
 
     async def start(self):
-        """Inicia el bot completo"""
-        # 1. Iniciar aria2c
-        if not Aria2Manager.start(str(self.storage_path)):
-            log.error("❌ No se pudo iniciar aria2c")
+        if not Aria2Manager.start(str(self.storage)):
             sys.exit(1)
 
-        # 2. Conectar RPC
         self.aria2 = Aria2RPC()
         if not self.aria2.wait_ready():
-            log.error("❌ aria2 RPC no disponible")
             Aria2Manager.stop()
             sys.exit(1)
 
-        # 3. Limpiar caché viejo
-        self.cache.cleanup_old()
-
-        # 4. Conectar Telegram
-        log.info("🔌 Conectando a Telegram...")
+        log.info("🔌 Conectando Telegram...")
         await self.client.start(bot_token=Config.BOT_TOKEN)
 
         me = await self.client.get_me()
         log.info(f"✓ Bot: @{me.username} (ID: {me.id})")
 
-        # Verificar canal
         try:
             ch = await self.client.get_entity(Config.CHANNEL_ID)
-            log.info(f"✓ Canal configurado: {ch.title}")
+            log.info(f"✓ Canal: {ch.title}")
         except Exception as e:
-            log.warning(f"⚠️ Canal no accesible: {e} — las subidas pueden fallar")
+            log.warning(f"⚠️ Canal: {e}")
 
-        # 5. Registrar handlers
         self._register_handlers()
-
         log.info("✅ Bot listo — esperando mensajes...")
         await self.client.run_until_disconnected()
 
     # ─── HANDLERS ────────────────────────────────────────────────────────────
 
     def _register_handlers(self):
-        """Registra todos los handlers de eventos"""
 
-        # ── /start y /help ──
         @self.client.on(events.NewMessage(pattern=r"^/(?:start|help)$"))
         async def cmd_help(event):
+            ffmpeg_status = "✅ Activo" if VideoConverter.ffmpeg_available() else "❌ No instalado"
             await event.reply(
-                "🚀 **TeleTorrent Bot v13.0**\n\n"
-                "Descarga torrents y archivos → sube a Telegram\n\n"
-                "**📋 Cómo usar:**\n"
-                "• Pega un **magnet link**\n"
-                "• Pega una **URL HTTP/HTTPS**\n"
-                "• Envía un **archivo .torrent**\n\n"
+                "🚀 **TeleTorrent Bot v14.0**\n\n"
+                "Descarga → Convierte → Sube a Telegram\n\n"
+                "**📥 Envíame:**\n"
+                "• Un **magnet link**\n"
+                "• Una **URL HTTP/HTTPS**\n"
+                "• Un archivo **.torrent**\n\n"
                 "**⚙️ Comandos:**\n"
-                "`/status` — ver progreso actual\n"
+                "`/status` — progreso actual\n"
                 "`/cancel` — cancelar descarga\n"
-                "`/storage` — ver espacio libre\n"
-                "`/help` — esta ayuda\n\n"
-                "**📦 Límite:** 2 GB por archivo",
+                "`/storage` — espacio en disco\n\n"
+                f"**🎬 Conversión de video:** {ffmpeg_status}\n"
+                "Videos se convierten a MP4 H264 para\n"
+                "reproducirse en Telegram.",
                 parse_mode="markdown"
             )
 
-        # ── /status ──
         @self.client.on(events.NewMessage(pattern=r"^/status$"))
         async def cmd_status(event):
             cid = event.chat_id
-
             if cid not in self.tasks:
                 await event.reply("⏸ **Sin descargas activas**", parse_mode="markdown")
                 return
-
             task = self.tasks[cid]
             info = self.aria2.get_status(task.gid)
-
             if not info:
-                await event.reply("⚠️ **No se pudo obtener estado**", parse_mode="markdown")
+                await event.reply("⚠️ No se pudo obtener estado", parse_mode="markdown")
                 return
+            await event.reply(self._build_progress_text(task, info), parse_mode="markdown")
 
-            text = self._format_status(task, info)
-            await event.reply(text, parse_mode="markdown")
-
-        # ── /cancel ──
         @self.client.on(events.NewMessage(pattern=r"^/cancel$"))
         async def cmd_cancel(event):
             cid = event.chat_id
-
             if cid not in self.tasks:
-                await event.reply("ℹ️ **Nada que cancelar**", parse_mode="markdown")
+                await event.reply("ℹ️ Nada que cancelar", parse_mode="markdown")
                 return
+            await self._cancel_task(cid)
+            await event.reply("✅ **Cancelado**", parse_mode="markdown")
 
-            await self._cancel_task(cid, notify=True)
-            await event.reply("✅ **Descarga cancelada**", parse_mode="markdown")
-
-        # ── /storage ──
         @self.client.on(events.NewMessage(pattern=r"^/storage$"))
         async def cmd_storage(event):
             try:
-                stat  = shutil.disk_usage(self.storage_path)
-                files = list(self.storage_path.rglob("*"))
-                files = [f for f in files if f.is_file()]
-                total_files_size = sum(f.stat().st_size for f in files)
-
+                st    = shutil.disk_usage(self.storage)
+                files = [f for f in self.storage.rglob("*") if f.is_file()]
+                fsize = sum(f.stat().st_size for f in files)
                 await event.reply(
                     f"💾 **Almacenamiento**\n\n"
-                    f"Total disco: `{Utils.format_size(stat.total)}`\n"
-                    f"Usado: `{Utils.format_size(stat.used)}`\n"
-                    f"Libre: `{Utils.format_size(stat.free)}`\n"
-                    f"Archivos en descarga: `{len(files)}`\n"
-                    f"Tamaño total: `{Utils.format_size(total_files_size)}`",
+                    f"Disco total: `{Utils.format_size(st.total)}`\n"
+                    f"Usado:       `{Utils.format_size(st.used)}`\n"
+                    f"**Libre:     `{Utils.format_size(st.free)}`**\n\n"
+                    f"Archivos:    `{len(files)}`\n"
+                    f"Tamaño:      `{Utils.format_size(fsize)}`",
                     parse_mode="markdown"
                 )
             except Exception as e:
-                await event.reply(f"❌ Error: {e}")
+                await event.reply(f"❌ {e}")
 
-        # ── MENSAJES GENERALES ──
         @self.client.on(events.NewMessage)
-        async def cmd_message(event):
-            # Ignorar comandos (ya manejados arriba)
+        async def cmd_msg(event):
             text = (event.message.text or "").strip()
             if text.startswith("/"):
                 return
-
-            # Magnet link
             if text.lower().startswith("magnet:?xt="):
                 await self._handle_magnet(event, text)
-                return
-
-            # URL HTTP/HTTPS
-            if re.match(r"https?://", text, re.IGNORECASE):
+            elif re.match(r"https?://", text, re.IGNORECASE):
                 await self._handle_url(event, text)
-                return
-
-            # Archivo adjunto (documento)
-            if event.message.document:
+            elif event.message.document:
                 await self._handle_document(event)
-                return
 
-    # ─── MANEJADORES DE TIPO ─────────────────────────────────────────────────
+    # ─── MANEJADORES ─────────────────────────────────────────────────────────
 
     async def _handle_magnet(self, event, magnet: str):
-        """Procesa magnet link"""
         cid = event.chat_id
-
-        if not self._check_no_active(cid):
-            await event.reply(
-                "⚠️ **Ya hay una descarga activa**\n"
-                "Usa `/cancel` para cancelarla primero.",
-                parse_mode="markdown"
-            )
+        if cid in self.tasks:
+            await event.reply("⚠️ Ya hay descarga activa. Usa `/cancel`.", parse_mode="markdown")
             return
 
-        # Validar magnet
         if not re.search(r"xt=urn:btih:", magnet, re.IGNORECASE):
-            await event.reply("❌ **Magnet link inválido**", parse_mode="markdown")
+            await event.reply("❌ Magnet inválido", parse_mode="markdown")
             return
 
         name = Utils.extract_name_from_magnet(magnet)
@@ -714,407 +711,298 @@ class TeleTorrentBot:
             parse_mode="markdown"
         )
 
-        try:
-            options = {
-                "dir":          str(self.storage_path),
-                "seed-time":    "0",
-                "bt-stop-timeout": "300",
-            }
+        gid = self.aria2.add_uri([magnet], {
+            "dir": str(self.storage), "seed-time": "0", "bt-stop-timeout": "300"
+        })
 
-            gid = self.aria2.add_uri([magnet], options)
+        if not gid:
+            await self._safe_edit(sm, "❌ **No se pudo agregar el magnet**")
+            return
 
-            if not gid:
-                await self._safe_edit(sm, "❌ **No se pudo agregar el magnet**\naria2 no respondió correctamente.")
-                return
-
-            task = DownloadTask(gid=gid, name=name, chat_id=cid, source="magnet")
-            task.status_msg = sm
-            self.tasks[cid]  = task
-
-            await self._safe_edit(
-                sm,
-                f"✅ **Magnet agregado**\n"
-                f"📁 `{name[:50]}`\n\n"
-                f"`{Utils.progress_bar(0)}` `0%`\n"
-                f"⏳ Conectando a peers...",
-                parse_mode="markdown"
-            )
-
-            task.monitor_task = asyncio.create_task(
-                self._monitor_download(cid),
-                name=f"monitor_{cid}"
-            )
-
-        except Exception as e:
-            log.error(f"Error en magnet [{cid}]: {e}", exc_info=True)
-            await self._safe_edit(sm, f"❌ **Error:** `{str(e)[:100]}`")
+        await self._start_task(cid, gid, name, "magnet", sm)
 
     async def _handle_url(self, event, url: str):
-        """Procesa URL HTTP/HTTPS"""
         cid = event.chat_id
-
-        if not self._check_no_active(cid):
-            await event.reply(
-                "⚠️ **Ya hay una descarga activa**\n"
-                "Usa `/cancel` para cancelarla primero.",
-                parse_mode="markdown"
-            )
+        if cid in self.tasks:
+            await event.reply("⚠️ Ya hay descarga activa. Usa `/cancel`.", parse_mode="markdown")
             return
 
-        # Validar URL básica
         try:
-            parsed = urlparse(url)
-            if not parsed.scheme or not parsed.netloc:
-                raise ValueError("URL malformada")
-        except Exception:
-            await event.reply("❌ **URL inválida**", parse_mode="markdown")
-            return
-
-        # Nombre de archivo desde URL
-        path_part = parsed.path.rstrip("/")
-        raw_name  = unquote(path_part.split("/")[-1]) if path_part else ""
-        name      = Utils.sanitize_filename(raw_name) if raw_name else "descarga"
+            p    = urlparse(url)
+            name = Utils.sanitize_filename(unquote(p.path.split("/")[-1])) or "descarga"
+        except:
+            name = "descarga"
 
         sm = await event.reply(
             f"⏳ **Iniciando descarga...**\n`{name[:50]}`",
             parse_mode="markdown"
         )
 
-        try:
-            options = {
-                "dir":                   str(self.storage_path),
-                "out":                   name,
-                "max-tries":             "10",
-                "retry-wait":            "5",
-                "connect-timeout":       "30",
-                "timeout":               "60",
-                "split":                 "8",
-                "max-connection-per-server": "8",
-                "min-split-size":        "5M",
-            }
+        gid = self.aria2.add_uri([url], {
+            "dir": str(self.storage), "out": name,
+            "max-connection-per-server": "8", "split": "8",
+            "min-split-size": "5M", "max-tries": "10",
+        })
 
-            gid = self.aria2.add_uri([url], options)
-
-            if not gid:
-                await self._safe_edit(sm, "❌ **No se pudo agregar la URL**\nVerifica que sea válida.")
-                return
-
-            task = DownloadTask(gid=gid, name=name, chat_id=cid, source="url")
-            task.status_msg = sm
-            self.tasks[cid]  = task
-
-            await self._safe_edit(
-                sm,
-                f"✅ **Descargando**\n"
-                f"📄 `{name[:50]}`\n\n"
-                f"`{Utils.progress_bar(0)}` `0%`\n"
-                f"⏳ Iniciando...",
-                parse_mode="markdown"
-            )
-
-            task.monitor_task = asyncio.create_task(
-                self._monitor_download(cid),
-                name=f"monitor_{cid}"
-            )
-
-        except Exception as e:
-            log.error(f"Error en URL [{cid}]: {e}", exc_info=True)
-            await self._safe_edit(sm, f"❌ **Error:** `{str(e)[:100]}`")
-
-    async def _handle_document(self, event):
-        """Procesa archivo .torrent enviado al bot"""
-        cid = event.chat_id
-        doc = event.message.document
-
-        if not self._check_no_active(cid):
-            await event.reply(
-                "⚠️ **Ya hay una descarga activa**\n"
-                "Usa `/cancel` para cancelarla primero.",
-                parse_mode="markdown"
-            )
+        if not gid:
+            await self._safe_edit(sm, "❌ **No se pudo agregar la URL**")
             return
 
-        # Obtener nombre del archivo
-        name = "archivo_desconocido"
+        await self._start_task(cid, gid, name, "url", sm)
+
+    async def _handle_document(self, event):
+        cid = event.chat_id
+        if cid in self.tasks:
+            await event.reply("⚠️ Ya hay descarga activa. Usa `/cancel`.", parse_mode="markdown")
+            return
+
+        doc  = event.message.document
+        name = "archivo"
         if doc.attributes:
-            for attr in doc.attributes:
-                if isinstance(attr, DocumentAttributeFilename):
-                    name = attr.file_name
+            for a in doc.attributes:
+                if isinstance(a, DocumentAttributeFilename):
+                    name = a.file_name
                     break
 
-        is_torrent = name.lower().endswith(".torrent") or doc.mime_type == "application/x-bittorrent"
-
+        is_torrent = name.lower().endswith(".torrent")
         sm = await event.reply(
-            f"⏳ **Descargando archivo...**\n`{name[:50]}`",
+            f"📥 **Descargando de Telegram...**\n`{name[:50]}`",
             parse_mode="markdown"
         )
 
+        tmp = self.storage / f"tmp_{int(time.time())}_{name}"
         try:
-            # Descargar el documento a un archivo temporal
-            tmp_path = self.storage_path / f"tmp_{int(time.time())}_{name}"
+            await event.message.download_media(str(tmp))
 
-            await self._safe_edit(sm, f"📥 **Descargando de Telegram...**\n`{name[:50]}`")
-
-            await event.message.download_media(str(tmp_path))
-
-            if not tmp_path.exists() or tmp_path.stat().st_size == 0:
-                await self._safe_edit(sm, "❌ **Archivo vacío o no descargado**")
+            if not tmp.exists() or tmp.stat().st_size == 0:
+                await self._safe_edit(sm, "❌ Archivo vacío")
                 return
 
             if is_torrent:
-                # Procesar como torrent
-                await self._process_torrent_file(cid, sm, tmp_path, name)
+                b64 = base64.b64encode(tmp.read_bytes()).decode()
+                try: tmp.unlink()
+                except: pass
+
+                gid = self.aria2.add_torrent(b64, {
+                    "dir": str(self.storage), "seed-time": "0"
+                })
+                if not gid:
+                    await self._safe_edit(sm, "❌ No se pudo procesar el torrent")
+                    return
+                await self._start_task(cid, gid, name.replace(".torrent",""), "torrent", sm)
             else:
-                # Subir directamente al canal
-                await self._safe_edit(sm, f"✅ **Descargado!** Subiendo al canal...\n`{name[:50]}`")
-                await self._upload_files(cid, [str(tmp_path)])
-                await self._safe_delete(sm)
-
+                # Subir directamente
+                await self._safe_edit(sm, f"✅ Descargado. Procesando...\n`{name[:50]}`")
+                await self._process_and_upload(cid, [str(tmp)], sm)
         except Exception as e:
-            log.error(f"Error en documento [{cid}]: {e}", exc_info=True)
-            await self._safe_edit(sm, f"❌ **Error:** `{str(e)[:100]}`")
+            log.error(f"Error documento: {e}", exc_info=True)
+            await self._safe_edit(sm, f"❌ Error: `{str(e)[:100]}`")
 
-    async def _process_torrent_file(self, cid: int, sm, torrent_path: Path, name: str):
-        """Agrega archivo .torrent a aria2"""
-        try:
-            import base64
+    async def _start_task(self, cid, gid, name, source, sm):
+        task = DownloadTask(gid=gid, name=name, chat_id=cid, source=source)
+        task.status_msg   = sm
+        self.tasks[cid]   = task
 
-            torrent_data = torrent_path.read_bytes()
-            torrent_b64  = base64.b64encode(torrent_data).decode("utf-8")
+        await self._safe_edit(
+            sm,
+            f"✅ **Descargando**\n"
+            f"📁 `{name[:50]}`\n\n"
+            f"`{Utils.progress_bar(0)}` `0%`\n"
+            f"⏳ Iniciando...",
+            parse_mode="markdown"
+        )
 
-            options = {
-                "dir":               str(self.storage_path),
-                "seed-time":         "0",
-                "bt-stop-timeout":   "300",
-            }
+        task.monitor_task = asyncio.create_task(
+            self._monitor(cid), name=f"mon_{cid}"
+        )
 
-            gid = self.aria2.add_torrent(torrent_b64, options)
+    # ─── MONITOR CON PROGRESO REAL ───────────────────────────────────────────
 
-            # Limpiar archivo temporal
-            try:
-                torrent_path.unlink()
-            except:
-                pass
-
-            if not gid:
-                await self._safe_edit(sm, "❌ **No se pudo procesar el torrent**")
-                return
-
-            display_name = name.replace(".torrent", "")
-            task = DownloadTask(gid=gid, name=display_name, chat_id=cid, source="torrent")
-            task.status_msg = sm
-            self.tasks[cid]  = task
-
-            await self._safe_edit(
-                sm,
-                f"✅ **Torrent agregado**\n"
-                f"📁 `{display_name[:50]}`\n\n"
-                f"`{Utils.progress_bar(0)}` `0%`\n"
-                f"⏳ Conectando a peers...",
-                parse_mode="markdown"
-            )
-
-            task.monitor_task = asyncio.create_task(
-                self._monitor_download(cid),
-                name=f"monitor_{cid}"
-            )
-
-        except Exception as e:
-            log.error(f"Error procesando torrent: {e}", exc_info=True)
-            await self._safe_edit(sm, f"❌ **Error en torrent:** `{str(e)[:100]}`")
-
-    # ─── MONITOR ─────────────────────────────────────────────────────────────
-
-    async def _monitor_download(self, cid: int):
-        """Monitorea el progreso de una descarga y sube al terminar"""
+    async def _monitor(self, cid: int):
+        """Monitor con actualización de progreso en tiempo real"""
         if cid not in self.tasks:
             return
 
-        task = self.tasks[cid]
-        log.info(f"🔍 Monitor iniciado: GID={task.gid} ({task.name})")
+        task       = self.tasks[cid]
+        last_pct   = -1.0
+        last_upd   = 0.0
+        stall_secs = 0
+        last_done  = 0
 
-        last_update_time  = 0
-        last_progress_pct = -1
-        stall_time        = 0
-        last_completed    = 0
-        MAX_STALL         = 600  # 10 min sin progreso = error
+        log.info(f"🔍 Monitor iniciado: {task.name} (GID={task.gid})")
 
         try:
             while True:
-                # Verificar timeout global
+                # Timeout global
                 if task.is_timed_out():
-                    log.warning(f"Timeout de descarga: {task.name}")
-                    await self._safe_edit(
-                        task.status_msg,
-                        "⏰ **Timeout** — La descarga tardó demasiado"
-                    )
+                    await self._safe_edit(task.status_msg,
+                        "⏰ **Timeout** — descarga demasiado lenta")
                     break
 
-                # Obtener estado
                 info = self.aria2.get_status(task.gid)
-
                 if info is None:
-                    log.warning(f"No se pudo obtener estado para GID={task.gid}")
                     await asyncio.sleep(Config.UPDATE_INTERVAL)
                     continue
 
-                status = info.get("status", "")
+                status    = info.get("status", "")
+                total     = int(info.get("totalLength",    0))
+                completed = int(info.get("completedLength",0))
+                speed     = int(info.get("downloadSpeed",  0))
 
-                # ── Estado: complete ──
+                # ── Completado ──
                 if status == "complete":
-                    log.info(f"✅ Descarga completada: {task.name}")
+                    log.info(f"✅ Completo: {task.name}")
+                    files = self._collect_files(info)
                     await self._safe_edit(
                         task.status_msg,
                         f"✅ **Descarga completa!**\n"
-                        f"📁 `{task.name[:50]}`\n\n"
+                        f"📁 `{task.name[:40]}`\n\n"
                         f"`{Utils.progress_bar(100)}` `100%`\n\n"
-                        f"⬆️ Subiendo al canal...",
-                        parse_mode="markdown"
+                        f"⬆️ Preparando subida..."
                     )
-                    await self._collect_and_upload(cid, info)
+                    await self._process_and_upload(cid, files, task.status_msg)
                     return
 
-                # ── Estado: error ──
+                # ── Error ──
                 if status == "error":
-                    err_code = info.get("errorCode", "?")
-                    err_msg  = info.get("errorMessage", "Error desconocido")
-                    log.error(f"Error aria2 [{task.gid}]: [{err_code}] {err_msg}")
-                    await self._safe_edit(
-                        task.status_msg,
-                        f"❌ **Error de descarga**\n"
-                        f"Código: `{err_code}`\n"
-                        f"Detalle: `{err_msg[:100]}`"
-                    )
+                    ec  = info.get("errorCode", "?")
+                    em  = info.get("errorMessage", "Error")
+                    log.error(f"aria2 error [{task.gid}]: [{ec}] {em}")
+                    await self._safe_edit(task.status_msg,
+                        f"❌ **Error de descarga**\n`{em[:100]}`")
                     break
 
-                # ── Estado: removed ──
                 if status == "removed":
-                    await self._safe_edit(task.status_msg, "🗑 **Descarga eliminada**")
+                    await self._safe_edit(task.status_msg, "🗑 **Eliminado**")
                     break
 
-                # ── Estado: active / waiting / paused ──
-                total     = int(info.get("totalLength", 0))
-                completed = int(info.get("completedLength", 0))
-                speed     = int(info.get("downloadSpeed", 0))
-
-                progress_pct = (completed / total * 100) if total > 0 else 0
+                # ── Progreso ──
+                pct = (completed / total * 100) if total > 0 else 0
 
                 # Detectar stall
-                if completed > last_completed:
-                    stall_time    = 0
-                    last_completed = completed
+                if completed > last_done:
+                    stall_secs = 0
+                    last_done  = completed
                 else:
-                    stall_time += Config.UPDATE_INTERVAL
-                    if stall_time >= MAX_STALL and total > 0:
-                        log.warning(f"Stall detectado: {task.name}")
-                        await self._safe_edit(
-                            task.status_msg,
-                            f"⚠️ **Sin progreso por {Utils.format_eta(MAX_STALL)}**\n"
-                            f"Puede que no haya seeds disponibles.\n"
-                            f"Usa `/cancel` para cancelar."
-                        )
-                        stall_time = 0  # reset para no spam
+                    stall_secs += Config.UPDATE_INTERVAL
 
-                # Actualizar mensaje solo si cambió suficiente o pasó tiempo
+                if stall_secs >= Config.MAX_STALL_TIME and total > 0:
+                    await self._safe_edit(task.status_msg,
+                        f"⚠️ **Sin progreso por {Utils.format_eta(Config.MAX_STALL_TIME)}**\n"
+                        f"Sin seeds. Usa `/cancel` para cancelar.")
+                    stall_secs = 0
+
+                # Actualizar nombre real (torrents)
+                if task.source in ("magnet","torrent"):
+                    bt = info.get("bittorrent",{})
+                    rn = bt.get("info",{}).get("name","")
+                    if rn and rn != task.name:
+                        task.name = rn
+
+                # Actualizar mensaje
                 now = time.time()
-                progress_changed = abs(progress_pct - last_progress_pct) >= 1
-                time_passed      = (now - last_update_time) >= Config.UPDATE_INTERVAL
+                pct_changed  = abs(pct - last_pct) >= 0.5
+                time_elapsed = (now - last_upd) >= Config.UPDATE_INTERVAL
 
-                if progress_changed or time_passed:
-                    last_update_time  = now
-                    last_progress_pct = progress_pct
-
-                    # Calcular ETA
-                    eta = "∞"
-                    if speed > 0 and total > completed:
-                        eta = Utils.format_eta((total - completed) / speed)
-
-                    # Obtener nombre real si es torrent
-                    if status == "active" and task.source in ("magnet", "torrent"):
-                        bt_info = info.get("bittorrent", {})
-                        bt_name = bt_info.get("info", {}).get("name", "")
-                        if bt_name and bt_name != task.name:
-                            task.name = bt_name
-
-                    bar = Utils.progress_bar(progress_pct)
-                    status_emoji = {
-                        "active":  "⬇️",
-                        "waiting": "⏳",
-                        "paused":  "⏸️"
-                    }.get(status, "🔄")
-
-                    text = (
-                        f"{status_emoji} **{task.name[:40]}**\n\n"
-                        f"`{bar}` `{progress_pct:.1f}%`\n"
-                        f"📊 {Utils.format_speed(speed)}\n"
-                        f"📥 {Utils.format_size(completed)} / {Utils.format_size(total)}\n"
-                        f"⏱ ETA: {eta}"
-                    )
-
+                if pct_changed or time_elapsed:
+                    last_pct = pct
+                    last_upd = now
+                    text = self._build_progress_text(task, info)
                     await self._safe_edit(task.status_msg, text, parse_mode="markdown")
 
                 await asyncio.sleep(Config.UPDATE_INTERVAL)
 
         except asyncio.CancelledError:
             log.info(f"Monitor cancelado: CID={cid}")
-
         except Exception as e:
-            log.error(f"Error en monitor [{cid}]: {e}", exc_info=True)
-            try:
-                await self._safe_edit(task.status_msg, f"❌ **Error interno:** `{str(e)[:100]}`")
-            except:
-                pass
-
+            log.error(f"Error monitor [{cid}]: {e}", exc_info=True)
+            await self._safe_edit(
+                self.tasks[cid].status_msg if cid in self.tasks else None,
+                f"❌ Error interno: `{str(e)[:100]}`"
+            )
         finally:
-            # Limpieza
             if cid in self.tasks:
                 del self.tasks[cid]
             log.info(f"🏁 Monitor finalizado: CID={cid}")
 
-    # ─── RECOLECCIÓN Y SUBIDA ─────────────────────────────────────────────────
+    def _build_progress_text(self, task: DownloadTask, info: dict) -> str:
+        """Construye texto de progreso con todos los datos"""
+        total     = int(info.get("totalLength",    0))
+        completed = int(info.get("completedLength",0))
+        speed     = int(info.get("downloadSpeed",  0))
+        status    = info.get("status","")
 
-    async def _collect_and_upload(self, cid: int, aria2_info: dict):
-        """Recolecta los archivos descargados y los sube"""
-        files_to_upload = []
+        pct = (completed / total * 100) if total > 0 else 0
+        bar = Utils.progress_bar(pct)
 
-        try:
-            # Obtener archivos desde aria2
-            aria_files = aria2_info.get("files", [])
-            for f in aria_files:
-                fp = f.get("path", "")
-                if fp and os.path.isfile(fp) and os.path.getsize(fp) > 0:
-                    # Excluir metadatos
-                    if not fp.endswith((".torrent", ".aria2", ".session")):
-                        files_to_upload.append(fp)
+        eta = Utils.format_eta((total - completed) / speed) if speed > 0 and total > completed else "∞"
 
-            # Si aria2 no dio archivos, buscar en el directorio
-            if not files_to_upload:
-                log.info("Buscando archivos en directorio...")
-                for item in sorted(self.storage_path.rglob("*")):
-                    if item.is_file() and item.stat().st_size > 0:
-                        if not item.name.endswith((".torrent", ".aria2", ".session", ".dat", ".log")):
-                            files_to_upload.append(str(item))
+        icons = {"active":"⬇️","waiting":"⏳","paused":"⏸️","complete":"✅"}
+        icon  = icons.get(status, "🔄")
 
-            # Ordenar por tamaño descendente
-            files_to_upload.sort(key=lambda x: os.path.getsize(x), reverse=True)
+        # Línea de tamaño
+        if total > 0:
+            size_line = f"📦 {Utils.format_size(completed)} / {Utils.format_size(total)}"
+        else:
+            size_line = f"📦 {Utils.format_size(completed)}"
 
-        except Exception as e:
-            log.error(f"Error recolectando archivos: {e}")
+        lines = [
+            f"{icon} **{task.name[:40]}**",
+            "",
+            f"`{bar}` `{pct:.1f}%`",
+            f"🚀 {Utils.format_speed(speed)}",
+            size_line,
+            f"⏱ ETA: {eta}",
+            f"⏳ Tiempo: {Utils.format_eta(task.elapsed)}",
+        ]
 
-        if not files_to_upload:
-            await self._safe_edit(
-                self.tasks.get(cid, DownloadTask("", "", cid)).status_msg if cid in self.tasks else None,
-                "⚠️ **No se encontraron archivos para subir**"
-            )
+        if status == "waiting":
+            lines.append("_(en cola — esperando peers)_")
+        if status == "paused":
+            lines.append("_(pausado)_")
+
+        return "\n".join(lines)
+
+    # ─── RECOLECCIÓN DE ARCHIVOS ──────────────────────────────────────────────
+
+    def _collect_files(self, info: dict) -> List[str]:
+        """Obtiene lista de archivos completados"""
+        files = []
+
+        # Desde aria2 info
+        for f in info.get("files", []):
+            fp  = f.get("path","")
+            sel = f.get("selected","true")
+            if fp and sel != "false" and os.path.isfile(fp):
+                if os.path.getsize(fp) > 0:
+                    ext = Path(fp).suffix.lower()
+                    if ext not in (".torrent",".aria2",".session",".dat"):
+                        files.append(fp)
+
+        # Fallback: buscar en directorio
+        if not files:
+            skip = {".torrent",".aria2",".session",".dat",".log",".txt"}
+            for f in sorted(self.storage.rglob("*")):
+                if f.is_file() and f.stat().st_size > 0:
+                    if f.suffix.lower() not in skip and "tmp_" not in f.name:
+                        files.append(str(f))
+
+        # Ordenar: primero videos, luego por tamaño
+        videos    = [f for f in files if Utils.is_video(f)]
+        non_video = [f for f in files if not Utils.is_video(f)]
+        videos.sort(   key=lambda x: os.path.getsize(x), reverse=True)
+        non_video.sort(key=lambda x: os.path.getsize(x), reverse=True)
+
+        return videos + non_video
+
+    # ─── CONVERSIÓN + SUBIDA ─────────────────────────────────────────────────
+
+    async def _process_and_upload(self, cid: int, files: List[str], sm):
+        """Convierte si es necesario y sube al canal"""
+        if not files:
+            await self._safe_edit(sm, "⚠️ **No se encontraron archivos**")
+            await self.client.send_message(cid, "⚠️ Sin archivos para subir", parse_mode="markdown")
             return
-
-        log.info(f"📦 {len(files_to_upload)} archivo(s) para subir")
-        await self._upload_files(cid, files_to_upload)
-
-    async def _upload_files(self, cid: int, files: List[str]):
-        """Sube lista de archivos al canal de Telegram"""
-        task       = self.tasks.get(cid)
-        status_msg = task.status_msg if task else None
 
         uploaded = 0
         failed   = 0
@@ -1124,73 +1012,156 @@ class TeleTorrentBot:
             if not os.path.isfile(fp):
                 continue
 
-            size = os.path.getsize(fp)
             fn   = os.path.basename(fp)
+            size = os.path.getsize(fp)
 
-            # Verificar tamaño máximo
+            # Tamaño máximo
             if size > Config.MAX_FILE_SIZE:
-                log.warning(f"⚠️ {fn} demasiado grande: {Utils.format_size(size)}")
+                log.warning(f"Omitido (muy grande): {fn} {Utils.format_size(size)}")
                 await self.client.send_message(
                     cid,
-                    f"⚠️ **Archivo demasiado grande para Telegram**\n"
-                    f"`{fn}` — {Utils.format_size(size)}\n"
-                    f"(Límite: {Utils.format_size(Config.MAX_FILE_SIZE)})",
+                    f"⚠️ `{fn}` ({Utils.format_size(size)}) supera el límite de Telegram (2GB)",
                     parse_mode="markdown"
                 )
                 skipped += 1
                 continue
 
-            log.info(f"📤 Subiendo: {fn} ({Utils.format_size(size)})")
+            # ── Conversión de video ──
+            if Utils.is_video(fp) and VideoConverter.ffmpeg_available():
+                suffix = Path(fp).suffix.lower()
+                needs  = Utils.needs_conversion(fp)
 
-            try:
-                if status_msg:
+                # Para MP4 verificar si tiene codec compatible
+                if suffix == ".mp4":
+                    vinfo = VideoConverter.get_video_info(fp)
+                    vc    = vinfo.get("vcodec","")
+                    ac    = vinfo.get("acodec","")
+                    needs = vc not in ("h264","avc","avc1") or ac not in ("aac","mp4a")
+                    if needs:
+                        log.info(f"MP4 con codec {vc}/{ac} — necesita conversión")
+
+                if needs:
                     await self._safe_edit(
-                        status_msg,
-                        f"📤 **Subiendo al canal...**\n"
-                        f"`{fn[:50]}`\n"
-                        f"📦 {Utils.format_size(size)}",
+                        sm,
+                        f"🎬 **Convirtiendo video...**\n"
+                        f"`{fn[:50]}`\n\n"
+                        f"`{Utils.progress_bar(0)}` `0%`\n"
+                        f"⚙️ Preparando ffmpeg...",
                         parse_mode="markdown"
                     )
 
-                # Verificar caché
-                md5     = Utils.get_file_md5(fp)
-                file_id = self.cache.get_file_id(md5) if md5 else None
+                    async def conv_progress(pct, eta_secs):
+                        bar = Utils.progress_bar(pct)
+                        await self._safe_edit(
+                            sm,
+                            f"🎬 **Convirtiendo video...**\n"
+                            f"`{fn[:50]}`\n\n"
+                            f"`{bar}` `{pct:.1f}%`\n"
+                            f"⏱ ETA: {Utils.format_eta(eta_secs)}",
+                            parse_mode="markdown"
+                        )
 
-                if file_id:
-                    # Reenviar desde caché
-                    log.info(f"♻️ Usando caché para {fn}")
-                    msg = await self.client.send_file(
-                        Config.CHANNEL_ID,
-                        file=file_id,
-                        caption=f"📁 {fn}\n💾 {Utils.format_size(size)}",
-                        force_document=True
-                    )
+                    converted = await VideoConverter.convert(fp, conv_progress)
+
+                    if converted:
+                        fp   = converted
+                        fn   = os.path.basename(fp)
+                        size = os.path.getsize(fp)
+                        log.info(f"✅ Convertido: {fn}")
+                    else:
+                        log.warning(f"Conversión falló, subiendo original: {fn}")
+                        await self._safe_edit(
+                            sm,
+                            f"⚠️ Conversión falló, subiendo original...\n`{fn}`"
+                        )
                 else:
-                    # Subir archivo nuevo con progress callback
-                    sent_size_ref = [0]
+                    log.info(f"✅ {fn} ya es compatible con Telegram")
 
-                    def progress_callback(sent, total):
-                        sent_size_ref[0] = sent
+            # ── Subir a Telegram ──
+            fn   = os.path.basename(fp)
+            size = os.path.getsize(fp)
+            is_v = Utils.is_video(fp)
 
-                    msg = await self.client.send_file(
-                        Config.CHANNEL_ID,
-                        file=fp,
-                        caption=f"📁 {fn}\n💾 {Utils.format_size(size)}",
-                        force_document=True,
-                        progress_callback=progress_callback,
+            log.info(f"📤 Subiendo: {fn} ({Utils.format_size(size)})")
+
+            # Estado inicial de subida
+            await self._safe_edit(
+                sm,
+                f"📤 **Subiendo al canal...**\n"
+                f"`{fn[:50]}`\n\n"
+                f"`{Utils.progress_bar(0)}` `0%`\n"
+                f"📦 {Utils.format_size(size)}",
+                parse_mode="markdown"
+            )
+
+            try:
+                last_edit_time = [0.0]
+
+                async def upload_progress(sent, total):
+                    """Callback de progreso de subida"""
+                    now = time.time()
+                    if now - last_edit_time[0] < 3:   # máx 1 update cada 3s
+                        return
+                    last_edit_time[0] = now
+
+                    pct  = (sent / total * 100) if total > 0 else 0
+                    bar  = Utils.progress_bar(pct)
+                    await self._safe_edit(
+                        sm,
+                        f"📤 **Subiendo al canal...**\n"
+                        f"`{fn[:50]}`\n\n"
+                        f"`{bar}` `{pct:.1f}%`\n"
+                        f"📦 {Utils.format_size(sent)} / {Utils.format_size(total)}",
+                        parse_mode="markdown"
                     )
 
-                    # Guardar en caché
-                    if md5 and msg and hasattr(msg, "document") and msg.document:
-                        self.cache.set_file_id(md5, str(msg.document.id), fn)
+                # Thumbnail para videos
+                thumb = None
+                vinfo = {}
+                if is_v:
+                    thumb = VideoConverter.generate_thumbnail(fp)
+                    vinfo = VideoConverter.get_video_info(fp)
+
+                # Atributos de video para Telegram
+                attributes = []
+                if is_v and vinfo.get("duration"):
+                    attributes.append(DocumentAttributeVideo(
+                        duration  = vinfo["duration"],
+                        w         = vinfo.get("width",  0),
+                        h         = vinfo.get("height", 0),
+                        supports_streaming = True,
+                    ))
+
+                # Enviar archivo
+                caption = (
+                    f"🎬 **{fn}**\n💾 {Utils.format_size(size)}"
+                    if is_v else
+                    f"📁 **{fn}**\n💾 {Utils.format_size(size)}"
+                )
+
+                await self.client.send_file(
+                    Config.CHANNEL_ID,
+                    file              = fp,
+                    caption           = caption,
+                    parse_mode        = "markdown",
+                    force_document    = False if is_v else True,
+                    thumb             = thumb,
+                    attributes        = attributes if attributes else None,
+                    progress_callback = upload_progress,
+                )
+
+                # Limpiar thumbnail
+                if thumb and os.path.exists(thumb):
+                    try: os.remove(thumb)
+                    except: pass
 
                 log.info(f"✅ Subido: {fn}")
                 uploaded += 1
 
-                # Eliminar archivo local tras subir
+                # Eliminar archivo local
                 try:
                     os.remove(fp)
-                    log.info(f"🗑 Eliminado local: {fn}")
+                    log.info(f"🗑 Eliminado: {fn}")
                 except Exception as e:
                     log.warning(f"No se pudo eliminar {fn}: {e}")
 
@@ -1199,13 +1170,10 @@ class TeleTorrentBot:
             except FloodWaitError as e:
                 log.warning(f"FloodWait {e.seconds}s")
                 await asyncio.sleep(e.seconds + 5)
-                # Reintentar
                 try:
                     await self.client.send_file(
-                        Config.CHANNEL_ID,
-                        file=fp,
-                        caption=f"📁 {fn}\n💾 {Utils.format_size(size)}",
-                        force_document=True
+                        Config.CHANNEL_ID, file=fp,
+                        caption=f"📁 {fn}", force_document=True
                     )
                     uploaded += 1
                 except Exception as e2:
@@ -1213,180 +1181,111 @@ class TeleTorrentBot:
                     failed += 1
 
             except ChatWriteForbiddenError:
-                log.error("Bot sin permisos en el canal")
+                log.error("Sin permisos en el canal")
                 await self.client.send_message(
                     cid,
                     "❌ **El bot no tiene permisos para enviar al canal**\n"
-                    "Agrégalo como administrador.",
+                    "Agrégalo como administrador con permisos para publicar.",
                     parse_mode="markdown"
                 )
                 break
 
             except Exception as e:
-                log.error(f"❌ Error subiendo {fn}: {e}", exc_info=True)
+                log.error(f"Error subiendo {fn}: {e}", exc_info=True)
                 failed += 1
 
-        # Mensaje resumen
-        if uploaded == 0 and failed == 0 and skipped == 0:
-            msg_final = "⚠️ **No se subió ningún archivo**"
-        elif failed == 0 and skipped == 0:
-            msg_final = f"✅ **¡Todo subido!**\n📦 {uploaded} archivo(s) enviado(s) al canal"
-        elif failed > 0:
-            msg_final = (
-                f"⚠️ **Completado con errores**\n"
-                f"✅ {uploaded} subido(s) | ❌ {failed} falló | ⏭ {skipped} omitido(s)"
-            )
+        # ── Resumen final ──
+        if uploaded > 0 and failed == 0:
+            summary = f"✅ **¡Listo!** {uploaded} archivo(s) enviado(s) al canal 🎉"
+        elif uploaded > 0 and failed > 0:
+            summary = f"⚠️ **Parcial:** ✅{uploaded} subido(s) | ❌{failed} fallido(s)"
+        elif skipped > 0:
+            summary = f"⚠️ **Omitidos:** {skipped} (muy grandes para Telegram)"
         else:
-            msg_final = f"✅ **{uploaded} subido(s)** | ⏭ {skipped} omitido(s) (muy grandes)"
+            summary = "❌ **No se pudo subir ningún archivo**"
 
-        await self.client.send_message(cid, msg_final, parse_mode="markdown")
+        await self.client.send_message(cid, summary, parse_mode="markdown")
+        await self._safe_delete(sm)
 
-        if status_msg:
-            await self._safe_delete(status_msg)
+    # ─── HELPERS ─────────────────────────────────────────────────────────────
 
-    # ─── AYUDANTES ───────────────────────────────────────────────────────────
-
-    def _check_no_active(self, cid: int) -> bool:
-        """True si NO hay tarea activa para este chat"""
-        return cid not in self.tasks
-
-    async def _cancel_task(self, cid: int, notify: bool = False):
-        """Cancela tarea activa para un chat"""
+    async def _cancel_task(self, cid: int):
         if cid not in self.tasks:
             return
-
         task = self.tasks[cid]
 
-        # Cancelar monitor
         if task.monitor_task and not task.monitor_task.done():
             task.monitor_task.cancel()
             try:
-                await asyncio.wait_for(
-                    asyncio.shield(task.monitor_task), timeout=3
-                )
+                await asyncio.wait_for(asyncio.shield(task.monitor_task), timeout=3)
             except:
                 pass
 
-        # Cancelar en aria2
         self.aria2.remove(task.gid)
-        self.aria2.purge(task.gid)
-
-        # Eliminar mensaje de estado
-        if task.status_msg:
-            await self._safe_delete(task.status_msg)
-
+        await self._safe_delete(task.status_msg)
         del self.tasks[cid]
-        log.info(f"✓ Tarea cancelada: CID={cid} GID={task.gid}")
-
-    def _format_status(self, task: DownloadTask, info: dict) -> str:
-        """Formatea mensaje de estado"""
-        total     = int(info.get("totalLength", 0))
-        completed = int(info.get("completedLength", 0))
-        speed     = int(info.get("downloadSpeed", 0))
-        status    = info.get("status", "?")
-
-        progress = (completed / total * 100) if total > 0 else 0
-        bar      = Utils.progress_bar(progress)
-
-        eta = "∞"
-        if speed > 0 and total > completed:
-            eta = Utils.format_eta((total - completed) / speed)
-
-        return (
-            f"📊 **Estado de descarga**\n\n"
-            f"📁 `{task.name[:40]}`\n"
-            f"🔄 Estado: `{status}`\n\n"
-            f"`{bar}` `{progress:.1f}%`\n"
-            f"📊 {Utils.format_speed(speed)}\n"
-            f"📥 {Utils.format_size(completed)} / {Utils.format_size(total)}\n"
-            f"⏱ ETA: {eta}\n"
-            f"⏳ Tiempo: {Utils.format_eta(task.elapsed)}"
-        )
+        log.info(f"✓ Cancelado: CID={cid}")
 
     @staticmethod
     async def _safe_edit(msg, text: str, parse_mode: str = "markdown"):
-        """Edita mensaje ignorando errores comunes"""
-        if msg is None:
+        if not msg:
             return
         try:
             await msg.edit(text, parse_mode=parse_mode)
-        except MessageNotModifiedError:
+        except (MessageNotModifiedError, MessageIdInvalidError):
             pass
-        except MessageIdInvalidError:
-            log.warning("Mensaje inválido al intentar editar")
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds + 1)
         except Exception as e:
-            log.warning(f"_safe_edit: {e}")
+            log.debug(f"_safe_edit: {e}")
 
     @staticmethod
     async def _safe_delete(msg):
-        """Elimina mensaje ignorando errores"""
-        if msg is None:
+        if not msg:
             return
         try:
             await msg.delete()
-        except Exception:
+        except:
             pass
 
     # ─── CIERRE ──────────────────────────────────────────────────────────────
 
     async def stop(self):
-        """Cierra el bot limpiamente"""
-        log.info("🛑 Cerrando bot...")
-
-        # Cancelar todas las tareas activas
+        log.info("🛑 Cerrando...")
         for cid in list(self.tasks.keys()):
             await self._cancel_task(cid)
-
-        # Desconectar Telegram
         try:
             await self.client.disconnect()
         except:
             pass
-
-        # Detener aria2
         Aria2Manager.stop()
-
-        # Limpiar archivos temporales
-        self._cleanup_temp()
-
-        log.info("✓ Bot cerrado correctamente")
-
-    def _cleanup_temp(self):
-        """Limpia archivos temporales"""
-        try:
-            for f in self.storage_path.glob("tmp_*"):
-                try:
-                    f.unlink()
-                except:
-                    pass
-        except:
-            pass
+        # Limpiar temporales
+        for f in self.storage.glob("tmp_*"):
+            try: f.unlink()
+            except: pass
+        log.info("✓ Bot cerrado")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PUNTO DE ENTRADA
+# MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 async def main():
-    bot = TeleTorrentBot()
-
-    # Manejar señales de sistema
+    bot  = TeleTorrentBot()
     loop = asyncio.get_event_loop()
 
-    def handle_signal(sig):
-        log.info(f"Señal recibida: {sig.name}")
+    def on_signal(sig):
+        log.info(f"Señal: {sig.name}")
         asyncio.create_task(bot.stop())
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
+            loop.add_signal_handler(sig, lambda s=sig: on_signal(s))
         except NotImplementedError:
-            pass  # Windows no soporta add_signal_handler
+            pass
 
     try:
         await bot.start()
     except KeyboardInterrupt:
-        log.info("Interrupción por teclado")
+        log.info("Ctrl+C")
     except Exception as e:
         log.error(f"Error fatal: {e}", exc_info=True)
     finally:
