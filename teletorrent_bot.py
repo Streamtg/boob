@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-🚀 TeleTorrent Bot v8.1 - CON TRANSMISSION CONFIGURADO
+🚀 TeleTorrent Bot v9.0 - DEFINITIVA Y COMPLETA
+Transmission integrado automáticamente
 Descarga torrents reales, sube a Telegram, limpia automáticamente
+SIN CONFIGURACIÓN MANUAL
 """
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -13,6 +16,7 @@ import signal
 import sys
 import time
 import threading
+import subprocess
 from pathlib import Path
 from typing import Optional, Dict, List
 
@@ -50,6 +54,7 @@ class Config:
     TRANSMISSION_PORT = 9091
     TRANSMISSION_USERNAME = None
     TRANSMISSION_PASSWORD = None
+    TRANSMISSION_DOWNLOAD_DIR = str(Path.home() / "downloads" / "torrents")
 
 # ═══ LOGGING ═════════════════════════════════════════════════════════════════
 logging.basicConfig(
@@ -59,6 +64,201 @@ logging.basicConfig(
 )
 log = logging.getLogger("TeleTorrent")
 
+# ═══ GESTOR DE TRANSMISSION ══════════════════════════════════════════════════
+class TransmissionManager:
+    """Gestor automático de Transmission"""
+
+    @staticmethod
+    def setup():
+        """Configura Transmission automáticamente"""
+        log.info("🔧 Configurando Transmission...")
+        
+        # Crear directorio de descargas
+        download_dir = Path(Config.TRANSMISSION_DOWNLOAD_DIR)
+        download_dir.mkdir(parents=True, exist_ok=True)
+        log.info(f"✓ Directorio: {download_dir}")
+        
+        # Crear directorio de configuración
+        config_dir = Path.home() / ".config" / "transmission-daemon"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        
+        settings_file = config_dir / "settings.json"
+        
+        # Configuración default
+        settings = {
+            "alt-speed-down": 50,
+            "alt-speed-enabled": False,
+            "alt-speed-time-begin": 540,
+            "alt-speed-time-day": 127,
+            "alt-speed-time-enabled": False,
+            "alt-speed-time-end": 1020,
+            "alt-speed-up": 50,
+            "announce-ip": "",
+            "announce-ip-enabled": False,
+            "anti-ip-blocklist": False,
+            "anti-ip-blocklist-url": "http://list.iblocklist.com/lists/blueeye/anti-p2p/iplist.txt",
+            "blocklist-enabled": False,
+            "blocklist-updates-enabled": True,
+            "blocklist-url": "http://list.iblocklist.com/lists/level1/anti-p2p/iplist.txt",
+            "cache-size-mb": 16,
+            "compact-view": False,
+            "dht-enabled": True,
+            "download-dir": str(download_dir),
+            "download-queue-enabled": True,
+            "download-queue-size": 3,
+            "encryption": 1,
+            "exec-commands": "",
+            "exec-commands-enabled": False,
+            "exit-when-done": False,
+            "incomplete-dir": "",
+            "incomplete-dir-enabled": False,
+            "inhibit-desktop-hibernation": False,
+            "lpd-enabled": True,
+            "main-window-height": 500,
+            "main-window-is-maximized": False,
+            "main-window-width": 900,
+            "main-window-x": 50,
+            "main-window-y": 50,
+            "message-level": 2,
+            "metadata-pause-threshold": 90,
+            "metainfo-dir": "",
+            "metainfo-dir-enabled": False,
+            "network-bind-address-ipv4": "127.0.0.1",
+            "network-bind-address-ipv6": "::1",
+            "peer-congestion-algorithm": "",
+            "peer-dht-enabled": True,
+            "peer-exchange-enabled": True,
+            "peer-id-ttl-hours": 6,
+            "peer-limit-global": 240,
+            "peer-limit-per-torrent": 60,
+            "peer-port": 6881,
+            "peer-port-random-high": 6889,
+            "peer-port-random-low": 6881,
+            "peer-port-random-on-start": False,
+            "peer-scrobbler-enabled": False,
+            "peer-socket-tos": "default",
+            "pex-enabled": True,
+            "port-forwarding-enabled": False,
+            "preallocation": 1,
+            "prefetch-enabled": True,
+            "proxy": "",
+            "proxy-auth-enabled": False,
+            "proxy-auth-password": "",
+            "proxy-auth-username": "",
+            "proxy-enabled": False,
+            "proxy-port": 80,
+            "proxy-type": 0,
+            "queue-stalled-enabled": True,
+            "queue-stalled-minutes": 30,
+            "ratio-limit": 2,
+            "ratio-limit-enabled": False,
+            "rename-partial-files": True,
+            "rpc-authentication-required": False,
+            "rpc-bind-address": "127.0.0.1",
+            "rpc-enabled": True,
+            "rpc-host-whitelist": "127.0.0.1,localhost",
+            "rpc-host-whitelist-enabled": False,
+            "rpc-password": "",
+            "rpc-port": 9091,
+            "rpc-url": "/transmission/rpc/",
+            "rpc-username": "",
+            "rpc-whitelist": "127.0.0.1,::1",
+            "rpc-whitelist-enabled": False,
+            "scrape-paused-torrents": False,
+            "script-torrent-added-filename": "",
+            "script-torrent-added-enabled": False,
+            "script-torrent-done-filename": "",
+            "script-torrent-done-enabled": False,
+            "seed-queue-enabled": False,
+            "seed-queue-size": 10,
+            "show-backup-trackers": False,
+            "sort-mode": 0,
+            "sort-reversed": False,
+            "speed-limit-down": 0,
+            "speed-limit-down-enabled": False,
+            "speed-limit-up": 0,
+            "speed-limit-up-enabled": False,
+            "start-added-torrents": True,
+            "statusbar-stats": 0,
+            "torrent-added-notification-enabled": True,
+            "torrent-complete-notification-enabled": True,
+            "torrent-complete-script-enabled": False,
+            "torrent-complete-script-filename": "",
+            "torrenting-enabled": True,
+            "trash-can-enabled": True,
+            "trash-original-torrent-files": False,
+            "umask": 18,
+            "upload-slots-per-torrent": 14,
+            "utp-enabled": True,
+            "watch-dir": "",
+            "watch-dir-enabled": False
+        }
+        
+        # Guardar configuración
+        try:
+            settings_file.write_text(json.dumps(settings, indent=4))
+            os.chmod(settings_file, 0o600)
+            log.info(f"✓ Configuración guardada")
+        except Exception as e:
+            log.warning(f"⚠ No se pudo guardar configuración: {e}")
+
+    @staticmethod
+    def is_running() -> bool:
+        """Verifica si Transmission está corriendo"""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "transmission-daemon"],
+                capture_output=True,
+                timeout=5
+            )
+            return result.returncode == 0
+        except:
+            return False
+
+    @staticmethod
+    def start():
+        """Inicia Transmission daemon"""
+        if TransmissionManager.is_running():
+            log.info("✓ Transmission ya está corriendo")
+            return
+        
+        log.info("🚀 Iniciando Transmission daemon...")
+        
+        try:
+            # Matar procesos anteriores
+            subprocess.run(["pkill", "-f", "transmission-daemon"], capture_output=True, timeout=5)
+            time.sleep(1)
+            
+            # Iniciar nuevo daemon
+            subprocess.Popen(
+                ["transmission-daemon", "-f"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            
+            # Esperar a que inicie
+            time.sleep(3)
+            
+            if TransmissionManager.is_running():
+                log.info("✓ Transmission iniciado correctamente")
+            else:
+                log.error("❌ Transmission no inició")
+                sys.exit(1)
+                
+        except Exception as e:
+            log.error(f"❌ Error iniciando Transmission: {e}")
+            sys.exit(1)
+
+    @staticmethod
+    def stop():
+        """Detiene Transmission daemon"""
+        try:
+            subprocess.run(["pkill", "-f", "transmission-daemon"], capture_output=True, timeout=5)
+            log.info("✓ Transmission detenido")
+        except:
+            pass
+
 # ═══ CLIENTE TRANSMISSION ════════════════════════════════════════════════════
 class TransmissionClient:
     """Cliente Transmission RPC"""
@@ -67,27 +267,40 @@ class TransmissionClient:
         """Inicializa cliente"""
         self.torrents: Dict = {}
         self.lock = threading.Lock()
+        self.client = None
         
-        try:
-            log.info("🔌 Conectando a Transmission...")
-            
-            self.client = transmissionrpc.Client(
-                host=Config.TRANSMISSION_HOST,
-                port=Config.TRANSMISSION_PORT,
-                username=Config.TRANSMISSION_USERNAME,
-                password=Config.TRANSMISSION_PASSWORD,
-            )
-            
-            # Verificar conexión
-            session = self.client.get_session()
-            log.info(f"✅ Transmission conectado")
-            log.info(f"📁 Directorio: {session.download_dir}")
-            
-        except Exception as e:
-            log.error(f"❌ Error conectando a Transmission: {e}")
-            log.error(f"\nAsegúrate de que Transmission está corriendo:")
-            log.error(f"  transmission-daemon -f &")
-            sys.exit(1)
+        # Conectar a Transmission
+        self._connect()
+
+    def _connect(self):
+        """Conecta al daemon Transmission"""
+        max_retries = 30
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                self.client = transmissionrpc.Client(
+                    host=Config.TRANSMISSION_HOST,
+                    port=Config.TRANSMISSION_PORT,
+                    username=Config.TRANSMISSION_USERNAME,
+                    password=Config.TRANSMISSION_PASSWORD,
+                    timeout=5,
+                )
+                
+                # Verificar conexión
+                session = self.client.get_session()
+                log.info(f"✅ Transmission conectado")
+                log.info(f"📁 Directorio: {session.download_dir}")
+                return
+                
+            except Exception as e:
+                retry_count += 1
+                if retry_count < max_retries:
+                    log.warning(f"⚠ Reintentando conexión ({retry_count}/{max_retries})...")
+                    time.sleep(1)
+                else:
+                    log.error(f"❌ No se pudo conectar a Transmission después de {max_retries} intentos")
+                    sys.exit(1)
 
     def add_magnet(self, magnet_uri: str) -> Dict:
         """Agrega magnet"""
@@ -216,7 +429,8 @@ class TransmissionClient:
     def close(self):
         """Cierra"""
         try:
-            self.client.close()
+            if self.client:
+                self.client.close()
         except:
             pass
 
@@ -225,11 +439,18 @@ class TorrentBot:
     """Bot Telegram"""
 
     def __init__(self):
+        # Configurar y iniciar Transmission
+        TransmissionManager.setup()
+        TransmissionManager.start()
+        
+        # Cliente Transmission
         self.transmission = TransmissionClient()
         
+        # Control
         self.active_tasks: Dict = {}
         self.status_msgs: Dict = {}
         
+        # Cliente Telegram
         self.client = TelegramClient(
             "bot_session",
             Config.API_ID,
@@ -269,10 +490,11 @@ class TorrentBot:
         @self.client.on(events.NewMessage(pattern=r"^/start$|^/help$"))
         async def help_cmd(event):
             await event.reply(
-                "*🚀 TeleTorrent Bot v8.1*\n\n"
-                "Con Transmission Real\n\n"
+                "*🚀 TeleTorrent Bot v9.0*\n\n"
+                "Transmission Integrado\n"
+                "Descarga torrents reales\n\n"
                 "*Comandos:*\n"
-                "/status - Progreso\n"
+                "/status - Ver progreso\n"
                 "/cancel - Cancelar\n\n"
                 "*Envía:*\n"
                 "• Magnet link\n"
@@ -297,10 +519,11 @@ class TorrentBot:
             
             bar = self._bar(int(p["progress"]))
             speed = TransmissionClient.format_size(int(p["speed"]))
+            eta = f"{int(p['eta'])}s" if p["eta"] > 0 else "∞"
             
             await event.reply(
                 f"`{bar}` {p['progress']:.0f}%\n"
-                f"{speed}/s\n"
+                f"{speed}/s | ETA: {eta}\n"
                 f"🌱 {p['peers']} peers"
             )
 
@@ -467,12 +690,13 @@ class TorrentBot:
                     
                     bar = self._bar(int(p["progress"]))
                     speed = TransmissionClient.format_size(int(p["speed"]))
+                    eta = f"{int(p['eta'])}s" if p["eta"] > 0 else "∞"
                     
                     try:
                         if cid in self.status_msgs:
                             await self.status_msgs[cid].edit(
                                 f"`{bar}` {p['progress']:.0f}%\n"
-                                f"{speed}/s\n"
+                                f"{speed}/s | ETA: {eta}\n"
                                 f"🌱 {p['peers']}"
                             )
                     except:
@@ -505,6 +729,7 @@ class TorrentBot:
                     
                     try:
                         os.remove(fpath)
+                        log.info(f"🗑️ Eliminado: {fname}")
                     except:
                         pass
                     
@@ -516,7 +741,7 @@ class TorrentBot:
             try:
                 await self.client.send_message(
                     cid,
-                    f"*✅ {ok} archivo(s)*"
+                    f"*✅ {ok} archivo(s) subido(s)*"
                 )
             except:
                 pass
@@ -547,6 +772,7 @@ class TorrentBot:
         log.info("🛑 Deteniendo...")
         self.transmission.close()
         await self.client.disconnect()
+        TransmissionManager.stop()
 
 # ═══ MAIN ════════════════════════════════════════════════════════════════════
 async def main(bot):
@@ -558,9 +784,9 @@ async def main(bot):
         await bot.stop()
 
 if __name__ == "__main__":
-    log.info("=" * 60)
-    log.info("🚀 TeleTorrent Bot v8.1")
-    log.info("=" * 60)
+    log.info("=" * 70)
+    log.info("🚀 TeleTorrent Bot v9.0 - TRANSMISSION INTEGRADO")
+    log.info("=" * 70)
     
     bot = TorrentBot()
     
