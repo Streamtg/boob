@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-🚀 TeleTorrent Bot v7.0 - DEFINITIVA Y REAL
-Sin dependencias problemáticas
-Parseo manual de torrents
+🚀 TeleTorrent Bot v8.0 - PROFESIONAL CON TRANSMISSION
+Usa Transmission RPC - Gestor de torrents real y profesional
+Descarga torrents correctamente, sube a Telegram, limpia automáticamente
 """
 
 import asyncio
@@ -14,13 +14,10 @@ import re
 import shutil
 import signal
 import sys
-import subprocess
-import tempfile
 import time
 import threading
 from pathlib import Path
 from typing import Optional, Dict, List
-from urllib.parse import quote, unquote
 
 # ═══ IMPORTACIONES ═══════════════════════════════════════════════════════════
 try:
@@ -35,18 +32,31 @@ except ImportError:
     print("❌ ERROR: pip install requests")
     sys.exit(1)
 
+try:
+    import transmissionrpc
+except ImportError:
+    print("❌ ERROR: pip install transmission-rpc")
+    sys.exit(1)
+
 # ═══ CONFIGURACION ═══════════════════════════════════════════════════════════
 class Config:
-    """Configuración"""
+    """Configuración centralizada"""
     
+    # Telegram
     API_ID = 34280578
     API_HASH = "b77ac49b31b12365b98f2333bd4c3eb0"
     BOT_TOKEN = "8835976877:AAHZyBbv_6MmVSnQ5rdM4Csq8Qjrb3Zjy60"
     CHANNEL_ID = -1003213143951
     
+    # Transmission
+    TRANSMISSION_HOST = "127.0.0.1"
+    TRANSMISSION_PORT = 9091
+    TRANSMISSION_USERNAME = ""
+    TRANSMISSION_PASSWORD = ""
+    
+    # Rutas
     STORAGE_PATH = "./downloads"
-    MAX_WORKERS = 2
-    CHUNK_SIZE = 5 * 1024 * 1024
+    DOWNLOAD_DIR = "/home/codespace/downloads/torrents"
 
 # ═══ LOGGING ═════════════════════════════════════════════════════════════════
 logging.basicConfig(
@@ -56,504 +66,200 @@ logging.basicConfig(
 )
 log = logging.getLogger("TeleTorrent")
 
-# ═══ PARSEADOR MANUAL DE TORRENTS ════════════════════════════════════════════
-class SimpleBencode:
-    """Parser bencode manual simple"""
-    
-    @staticmethod
-    def decode(data: bytes) -> dict:
-        """Parsea bencode básico"""
-        try:
-            result, _ = SimpleBencode._parse(data, 0)
-            return result
-        except:
-            return {}
-    
-    @staticmethod
-    def _parse(data: bytes, pos: int):
-        """Parser recursivo"""
-        if pos >= len(data):
-            return None, pos
-        
-        ch = chr(data[pos])
-        
-        # Diccionario
-        if ch == 'd':
-            result = {}
-            pos += 1
-            while pos < len(data) and chr(data[pos]) != 'e':
-                key, pos = SimpleBencode._parse(data, pos)
-                value, pos = SimpleBencode._parse(data, pos)
-                if key and value is not None:
-                    result[key] = value
-            return result, pos + 1
-        
-        # Lista
-        elif ch == 'l':
-            result = []
-            pos += 1
-            while pos < len(data) and chr(data[pos]) != 'e':
-                value, pos = SimpleBencode._parse(data, pos)
-                if value is not None:
-                    result.append(value)
-            return result, pos + 1
-        
-        # Integer
-        elif ch == 'i':
-            pos += 1
-            end = data.find(b'e', pos)
-            return int(data[pos:end]), end + 1
-        
-        # String
-        elif ch.isdigit():
-            end = data.find(b':', pos)
-            length = int(data[pos:end])
-            string_data = data[end+1:end+1+length]
-            return string_data, end + 1 + length
-        
-        return None, pos + 1
+# ═══ CLIENTE TRANSMISSION ════════════════════════════════════════════════════
+class TransmissionClient:
+    """Cliente Transmission RPC para torrents reales"""
 
-# ═══ PARSEADOR DE TORRENTS ═══════════════════════════════════════════════════
-class TorrentParser:
-    """Parsea archivos .torrent"""
-    
-    @staticmethod
-    def parse(torrent_data: bytes) -> Dict:
-        """Extrae metadatos"""
-        try:
-            decoded = SimpleBencode.decode(torrent_data)
-            
-            if not decoded or b'info' not in decoded:
-                return {"name": "Torrent", "size": 0, "files": []}
-            
-            info = decoded[b'info']
-            
-            # Nombre
-            if b'name' in info:
-                name = info[b'name']
-                if isinstance(name, bytes):
-                    name = name.decode('utf-8', errors='ignore')
-            else:
-                name = "Torrent"
-            
-            # Tamaño
-            total_size = 0
-            files = []
-            
-            if b'files' in info:
-                for f in info[b'files']:
-                    if isinstance(f, dict) and b'length' in f:
-                        size = f[b'length']
-                        if isinstance(size, int):
-                            total_size += size
-                        
-                        # Path
-                        if b'path' in f:
-                            path_parts = f[b'path']
-                            if isinstance(path_parts, list):
-                                path = "/".join([
-                                    p.decode('utf-8', errors='ignore') if isinstance(p, bytes) else str(p)
-                                    for p in path_parts
-                                ])
-                            else:
-                                path = str(path_parts)
-                            
-                            files.append({"path": path, "size": size})
-            else:
-                if b'length' in info:
-                    total_size = info[b'length']
-                    if isinstance(total_size, int):
-                        files = [{"path": name, "size": total_size}]
-            
-            log.info(f"📊 Torrent: {name} ({DownloadManager.format_size(total_size)})")
-            
-            return {
-                "name": name,
-                "size": total_size,
-                "files": files,
-            }
-        except Exception as e:
-            log.warning(f"Error parseando: {e}")
-            return {"name": "Torrent", "size": 0, "files": []}
-
-# ═══ GESTOR DE DESCARGAS ARIA2C ══════════════════════════════════════════════
-class DownloadManager:
-    """Gestor de descargas"""
-
-    def __init__(self, storage_path: str):
-        self.storage_path = Path(storage_path)
-        self.storage_path.mkdir(parents=True, exist_ok=True)
-        
-        self.torrent_path = self.storage_path / "torrents"
-        self.torrent_path.mkdir(exist_ok=True)
-        
-        self.downloads: Dict = {}
-        self.processes: Dict = {}
+    def __init__(self):
+        """Inicializa cliente Transmission"""
+        self.torrents: Dict = {}
         self.lock = threading.Lock()
         
-        if not self._check_aria2():
-            log.error("❌ aria2c no instalado")
-            log.error("Instala: sudo apt-get install -y aria2")
-            sys.exit(1)
-        
-        log.info("✅ aria2c listo")
-
-    @staticmethod
-    def _check_aria2() -> bool:
-        """Verifica aria2c"""
+        # Conectar a Transmission
         try:
-            result = subprocess.run(
-                ["aria2c", "--version"],
-                capture_output=True,
-                timeout=5
+            self.client = transmissionrpc.Client(
+                host=Config.TRANSMISSION_HOST,
+                port=Config.TRANSMISSION_PORT,
+                username=Config.TRANSMISSION_USERNAME or None,
+                password=Config.TRANSMISSION_PASSWORD or None,
             )
-            if result.returncode == 0:
-                version = result.stdout.decode().strip().split('\n')[0]
-                log.info(f"📌 {version}")
-                return True
-        except:
-            pass
-        return False
+            
+            # Verificar conexión
+            session = self.client.get_session()
+            log.info(f"✅ Transmission conectado")
+            log.info(f"📁 Directorio: {session.download_dir}")
+            
+            # Asegurar que el directorio existe
+            Path(session.download_dir).mkdir(parents=True, exist_ok=True)
+            
+        except Exception as e:
+            log.error(f"❌ No se pudo conectar a Transmission")
+            log.error(f"Asegúrate de que Transmission está corriendo:")
+            log.error(f"  transmission-daemon")
+            log.error(f"Error: {e}")
+            sys.exit(1)
 
     def add_magnet(self, magnet_uri: str) -> Dict:
-        """Agrega magnet"""
+        """Agrega un magnet link a Transmission"""
         try:
-            magnet_uri = magnet_uri.strip()
+            log.info(f"📥 Agregando magnet a Transmission...")
             
-            if "&" in magnet_uri:
-                magnet_uri = magnet_uri.split("&")[0]
-            
-            if not magnet_uri.startswith("magnet:?xt="):
-                raise ValueError("Magnet inválido")
-            
-            dn_match = re.search(r"dn=([^&]+)", magnet_uri)
-            name = dn_match.group(1) if dn_match else f"magnet_{int(time.time())}"
-            
-            try:
-                name = unquote(name)
-            except:
-                pass
-            
-            name = re.sub(r'[^a-zA-Z0-9._\- ]', '_', name)[:60]
-            
-            download_id = hashlib.md5(magnet_uri.encode()).hexdigest()[:12]
+            # Agregar al cliente
+            torrent = self.client.add_torrent(magnet_uri)
             
             with self.lock:
-                self.downloads[download_id] = {
-                    "type": "magnet",
-                    "uri": magnet_uri,
-                    "name": name,
-                    "total": 0,
-                    "downloaded": 0,
-                    "progress": 0,
-                    "speed": 0,
-                    "status": "pending",
+                self.torrents[torrent.id] = {
+                    "id": torrent.id,
+                    "name": torrent.name,
+                    "magnet": magnet_uri,
                     "started_at": time.time(),
                 }
             
-            log.info(f"✓ Magnet: {name}")
-            return {"download_id": download_id, "name": name}
+            log.info(f"✓ Magnet agregado: {torrent.name}")
+            
+            return {
+                "torrent_id": torrent.id,
+                "name": torrent.name,
+                "hash_string": torrent.hashString,
+            }
             
         except Exception as e:
-            log.error(f"Error magnet: {e}")
+            log.error(f"Error agregando magnet: {e}")
             raise
 
-    def add_torrent_file(self, torrent_data: bytes, name: str) -> Dict:
-        """Agrega torrent"""
+    def add_torrent_file(self, torrent_data: bytes, filename: str) -> Dict:
+        """Agrega un archivo .torrent a Transmission"""
         try:
-            name = name.replace(".torrent", "").strip()[:60]
-            name = re.sub(r'[^a-zA-Z0-9._\- ]', '_', name)
+            log.info(f"📥 Agregando torrent a Transmission...")
             
-            if not name:
-                name = f"torrent_{int(time.time())}"
+            # Guardar archivo temporalmente
+            temp_path = Path("/tmp") / f"temp_{int(time.time())}.torrent"
+            temp_path.write_bytes(torrent_data)
             
-            torrent_path = self.torrent_path / f"{name}.torrent"
-            if torrent_path.exists():
-                torrent_path = self.torrent_path / f"{name}_{int(time.time())}.torrent"
+            # Agregar al cliente
+            torrent = self.client.add_torrent(str(temp_path))
             
-            torrent_path.write_bytes(torrent_data)
-            
-            # Parsear metadatos
-            meta = TorrentParser.parse(torrent_data)
-            
-            download_id = hashlib.md5(torrent_data).hexdigest()[:12]
+            # Eliminar archivo temporal
+            temp_path.unlink(missing_ok=True)
             
             with self.lock:
-                self.downloads[download_id] = {
-                    "type": "torrent",
-                    "path": str(torrent_path),
-                    "name": meta["name"],
-                    "total": meta["size"],
-                    "downloaded": 0,
-                    "progress": 0,
-                    "speed": 0,
-                    "status": "pending",
+                self.torrents[torrent.id] = {
+                    "id": torrent.id,
+                    "name": torrent.name,
+                    "filename": filename,
                     "started_at": time.time(),
                 }
             
-            log.info(f"✓ Torrent: {meta['name']} ({self.format_size(meta['size'])})")
-            return {"download_id": download_id, "name": meta["name"], "size": meta["size"]}
+            log.info(f"✓ Torrent agregado: {torrent.name}")
+            
+            return {
+                "torrent_id": torrent.id,
+                "name": torrent.name,
+                "hash_string": torrent.hashString,
+            }
             
         except Exception as e:
-            log.error(f"Error torrent: {e}")
+            log.error(f"Error agregando torrent: {e}")
             raise
 
-    def add_http(self, url: str, name: str) -> Dict:
-        """Agrega HTTP"""
+    def get_torrent(self, torrent_id: int):
+        """Obtiene información del torrent"""
         try:
-            name = name.split("?")[0].split("#")[0].split("/")[-1][:60]
-            name = re.sub(r'[^a-zA-Z0-9._\- ]', '_', name)
-            
-            if not name:
-                name = "descarga"
-            
-            download_id = hashlib.md5(url.encode()).hexdigest()[:12]
-            
-            with self.lock:
-                self.downloads[download_id] = {
-                    "type": "http",
-                    "uri": url,
-                    "name": name,
-                    "total": 0,
-                    "downloaded": 0,
-                    "progress": 0,
-                    "speed": 0,
-                    "status": "pending",
-                    "started_at": time.time(),
-                }
-            
-            threading.Thread(
-                target=self._download_http,
-                args=(download_id,),
-                daemon=True
-            ).start()
-            
-            log.info(f"✓ HTTP: {name}")
-            return {"download_id": download_id, "name": name}
-            
-        except Exception as e:
-            log.error(f"Error HTTP: {e}")
-            raise
+            return self.client.get_torrent(torrent_id)
+        except:
+            return None
 
-    def start(self, download_id: str) -> bool:
-        """Inicia descarga"""
-        if download_id not in self.downloads:
-            return False
-        
+    def get_progress(self, torrent_id: int) -> Optional[Dict]:
+        """Obtiene el progreso del torrent"""
         try:
-            d = self.downloads[download_id]
-            
-            if d["type"] == "http":
-                return True
-            
-            threading.Thread(
-                target=self._run_aria2,
-                args=(download_id,),
-                daemon=True
-            ).start()
-            
-            return True
-        except Exception as e:
-            log.error(f"Error iniciando: {e}")
-            return False
-
-    def _run_aria2(self, download_id: str):
-        """Ejecuta aria2c"""
-        if download_id not in self.downloads:
-            return
-        
-        d = self.downloads[download_id]
-        d["status"] = "downloading"
-        
-        try:
-            cmd = [
-                "aria2c",
-                "--max-concurrent-downloads=1",
-                "--max-connection-per-server=4",
-                "--split=4",
-                f"--dir={self.storage_path}",
-                "--enable-dht=true",
-                "--dht-listen-port=6881-6889",
-                "--enable-peer-exchange=true",
-                "--bt-tracker-connect-timeout=10",
-                "--continue=true",
-                "--allow-overwrite=true",
-                "--summary-interval=1",
-            ]
-            
-            if d["type"] == "magnet":
-                log.info(f"🚀 Magnet: {d['name']}")
-                cmd.append(d["uri"])
-            elif d["type"] == "torrent":
-                if not os.path.exists(d["path"]):
-                    log.error(f"Torrent no encontrado")
-                    d["status"] = "error"
-                    return
-                log.info(f"🚀 Torrent: {d['name']}")
-                cmd.append(d["path"])
-            
-            log.debug(f"Ejecutando aria2c...")
-            
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                universal_newlines=True
-            )
-            
-            with self.lock:
-                self.processes[download_id] = proc
-            
-            # Monitorear output
-            def read_output():
-                try:
-                    for line in proc.stdout:
-                        if line and d["status"] == "downloading":
-                            log.debug(f"[aria2] {line.strip()[:80]}")
-                            
-                            if "%" in line:
-                                try:
-                                    m = re.search(r"(\d+)%", line)
-                                    if m:
-                                        d["progress"] = float(m.group(1))
-                                except:
-                                    pass
-                            
-                            if "B/s" in line:
-                                try:
-                                    m = re.search(r"([\d.]+)\s*([KMG]?)B/s", line)
-                                    if m:
-                                        speed = float(m.group(1))
-                                        unit = m.group(2) or ""
-                                        multipliers = {'K': 1024, 'M': 1024**2, 'G': 1024**3}
-                                        d["speed"] = speed * multipliers.get(unit, 1)
-                                except:
-                                    pass
-                except:
-                    pass
-            
-            thread = threading.Thread(target=read_output, daemon=True)
-            thread.start()
-            
-            returncode = proc.wait()
-            
-            if returncode == 0:
-                d["status"] = "completed"
-                d["progress"] = 100
-                log.info(f"✅ Completado: {d['name']}")
-            else:
-                d["status"] = "error"
-                log.error(f"aria2c error (código {returncode})")
-            
-            with self.lock:
-                if download_id in self.processes:
-                    del self.processes[download_id]
-                    
-        except Exception as e:
-            log.error(f"Error aria2: {e}")
-            d["status"] = "error"
-            with self.lock:
-                if download_id in self.processes:
-                    del self.processes[download_id]
-
-    def _download_http(self, download_id: str):
-        """Descarga HTTP"""
-        try:
-            d = self.downloads[download_id]
-            url = d["uri"]
-            file_path = self.storage_path / d["name"]
-            
-            d["status"] = "downloading"
-            
-            try:
-                r = requests.head(url, timeout=10, allow_redirects=True)
-                total = int(r.headers.get("content-length", 0))
-                d["total"] = total
-            except:
-                pass
-            
-            r = requests.get(url, timeout=60, stream=True)
-            r.raise_for_status()
-            
-            downloaded = 0
-            start = time.time()
-            
-            with open(file_path, "wb") as f:
-                for chunk in r.iter_content(chunk_size=Config.CHUNK_SIZE):
-                    if d["status"] == "cancelled":
-                        file_path.unlink(missing_ok=True)
-                        return
-                    
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        d["downloaded"] = downloaded
-                        
-                        if d["total"] > 0:
-                            d["progress"] = (downloaded / d["total"]) * 100
-                        
-                        elapsed = time.time() - start
-                        if elapsed > 0:
-                            d["speed"] = downloaded / elapsed
-            
-            d["status"] = "completed"
-            d["progress"] = 100
-            log.info(f"✅ HTTP: {d['name']}")
-            
-        except Exception as e:
-            log.error(f"HTTP error: {e}")
-            d["status"] = "error"
-
-    def get_progress(self, download_id: str) -> Optional[Dict]:
-        """Obtiene progreso"""
-        with self.lock:
-            if download_id not in self.downloads:
+            torrent = self.get_torrent(torrent_id)
+            if not torrent:
                 return None
             
-            d = self.downloads[download_id]
             return {
-                "progress": d["progress"],
-                "downloaded": d["downloaded"],
-                "total": d["total"],
-                "speed": d["speed"],
-                "status": d["status"],
+                "name": torrent.name,
+                "progress": torrent.progress,
+                "downloaded": torrent.downloaded,
+                "total": torrent.total_size,
+                "speed": torrent.rateDownload,
+                "status": torrent.status,
+                "eta": torrent.eta,
+                "peers": torrent.num_seeds,
             }
-
-    def get_files(self) -> List[str]:
-        """Obtiene archivos"""
-        files = []
-        try:
-            for item in self.storage_path.rglob("*"):
-                if (item.is_file() and item.stat().st_size > 0 and
-                    not item.name.endswith(".torrent") and
-                    not item.name.startswith(".") and
-                    "torrents" not in str(item)):
-                    files.append(str(item))
-        except:
-            pass
-        
-        return files
-
-    def cancel(self, download_id: str):
-        """Cancela"""
-        with self.lock:
-            if download_id in self.downloads:
-                self.downloads[download_id]["status"] = "cancelled"
             
-            if download_id in self.processes:
-                try:
-                    self.processes[download_id].terminate()
-                    self.processes[download_id].wait(timeout=5)
-                except:
-                    pass
-                del self.processes[download_id]
-        
-        log.info(f"✗ Cancelado")
+        except Exception as e:
+            log.warning(f"Error obteniendo progreso: {e}")
+            return None
+
+    def get_files(self, torrent_id: int) -> List[str]:
+        """Obtiene archivos descargados"""
+        try:
+            torrent = self.get_torrent(torrent_id)
+            if not torrent:
+                return []
+            
+            files = []
+            session = self.client.get_session()
+            download_dir = Path(session.download_dir)
+            
+            # Obtener archivos del torrent
+            for file in torrent.files():
+                file_path = download_dir / file['name']
+                if file_path.exists() and file_path.stat().st_size > 0:
+                    files.append(str(file_path))
+            
+            return files
+            
+        except Exception as e:
+            log.warning(f"Error obteniendo archivos: {e}")
+            return []
+
+    def remove_torrent(self, torrent_id: int, delete_data: bool = True):
+        """Elimina un torrent"""
+        try:
+            self.client.remove_torrent(torrent_id, delete_data=delete_data)
+            
+            with self.lock:
+                if torrent_id in self.torrents:
+                    del self.torrents[torrent_id]
+            
+            log.info(f"✓ Torrent eliminado: {torrent_id}")
+            
+        except Exception as e:
+            log.warning(f"Error eliminando torrent: {e}")
+
+    def start_torrent(self, torrent_id: int):
+        """Inicia la descarga del torrent"""
+        try:
+            self.client.start_torrent(torrent_id)
+            log.info(f"🚀 Torrent iniciado: {torrent_id}")
+        except Exception as e:
+            log.warning(f"Error iniciando torrent: {e}")
+
+    def wait_completion(self, torrent_id: int, timeout: int = 3600) -> bool:
+        """Espera a que se complete el torrent"""
+        try:
+            start_time = time.time()
+            
+            while time.time() - start_time < timeout:
+                torrent = self.get_torrent(torrent_id)
+                if not torrent:
+                    return False
+                
+                if torrent.progress >= 100:
+                    return True
+                
+                time.sleep(1)
+            
+            return False
+            
+        except Exception as e:
+            log.error(f"Error esperando: {e}")
+            return False
 
     @staticmethod
     def format_size(n: int) -> str:
-        """Formatea"""
+        """Formatea tamaño"""
         if n < 0:
             n = 0
         for u in ("B", "KB", "MB", "GB", "TB"):
@@ -563,28 +269,30 @@ class DownloadManager:
         return f"{n:.1f} PB"
 
     def close(self):
-        """Cierra"""
-        log.info("🛑 Cerrando...")
-        with self.lock:
-            for proc in self.processes.values():
-                try:
-                    proc.terminate()
-                except:
-                    pass
+        """Cierra cliente"""
+        log.info("🛑 Cerrando Transmission...")
+        try:
+            self.client.close()
+        except:
+            pass
 
 # ═══ BOT TELEGRAM ════════════════════════════════════════════════════════════
 class TorrentBot:
-    """Bot principal"""
+    """Bot Telegram con Transmission"""
 
     def __init__(self):
         self.config = Config()
         self.storage = Path(self.config.STORAGE_PATH)
         self.storage.mkdir(exist_ok=True)
         
-        self.dm = DownloadManager(str(self.storage))
-        self.active_tasks: Dict = {}
-        self.status_msgs: Dict = {}
+        # Cliente Transmission
+        self.transmission = TransmissionClient()
         
+        # Control de tareas
+        self.active_tasks: Dict[int, Dict] = {}  # chat_id -> {torrent_id, task}
+        self.status_msgs: Dict[int, object] = {}
+        
+        # Cliente Telegram
         self.client = TelegramClient(
             "bot_session",
             self.config.API_ID,
@@ -593,73 +301,98 @@ class TorrentBot:
             timeout=30
         )
         
-        log.info("✅ Bot listo")
+        log.info("✅ Bot TeleTorrent v8.0 inicializado")
 
     async def start(self):
-        """Inicia"""
+        """Inicia el bot"""
         try:
-            log.info("🔌 Conectando...")
+            log.info("🔌 Conectando a Telegram...")
             await self.client.start(bot_token=self.config.BOT_TOKEN)
             
             me = await self.client.get_me()
-            log.info(f"✓ @{me.username}")
+            log.info(f"✓ Bot: @{me.username}")
             
             try:
                 ch = await self.client.get_entity(self.config.CHANNEL_ID)
                 log.info(f"✓ Canal: {ch.title}")
             except:
-                pass
+                log.warning("⚠ Canal no accesible")
             
-            self._handlers()
+            self._register_handlers()
             
-            log.info("🔍 Escuchando...")
+            log.info("🔍 Escuchando mensajes...")
             await self.client.run_until_disconnected()
             
         except Exception as e:
             log.error(f"Error: {e}")
 
-    def _handlers(self):
-        """Handlers"""
+    def _register_handlers(self):
+        """Registra handlers de eventos"""
         
         @self.client.on(events.NewMessage(pattern=r"^/start$|^/help$"))
-        async def help_cmd(event):
+        async def help_handler(event):
             await event.reply(
-                "*🚀 TeleTorrent Bot v7.0*\n\n"
-                "Descarga torrents\n\n"
-                "*Comandos:*\n"
-                "/status - Ver\n"
-                "/cancel - Cancelar\n\n"
-                "*Envía:*\n"
-                "• Magnet\n"
-                "• .torrent\n"
-                "• URL HTTP",
+                "*🚀 TeleTorrent Bot v8.0*\n\n"
+                "Descarga torrents con Transmission\n"
+                "Sube a Telegram automáticamente\n\n"
+                "*📋 Comandos:*\n"
+                "🔹 `/help` - Esta ayuda\n"
+                "🔹 `/status` - Ver progreso\n"
+                "🔹 `/cancel` - Cancelar descarga\n\n"
+                "*💡 Envía:*\n"
+                "• Magnet link\n"
+                "• Archivo .torrent\n"
+                "• URL .torrent\n"
+                "• Link HTTP/HTTPS",
                 parse_mode="markdown"
             )
 
         @self.client.on(events.NewMessage(pattern=r"^/status$"))
-        async def status_cmd(event):
+        async def status_handler(event):
             cid = event.chat_id
+            
             if cid not in self.active_tasks:
-                await event.reply("*Sin descargas*")
+                await event.reply("*Sin descargas activas* ⏸", parse_mode="markdown")
                 return
             
-            p = self.dm.get_progress(self.active_tasks[cid])
+            torrent_id = self.active_tasks[cid]["torrent_id"]
+            p = self.transmission.get_progress(torrent_id)
+            
             if not p:
+                await event.reply("*Descarga no disponible* ❌", parse_mode="markdown")
                 return
             
-            bar = self._bar(int(p["progress"]))
+            bar = self._progress_bar(int(p["progress"]))
+            speed_text = TransmissionClient.format_size(p["speed"])
+            downloaded_text = TransmissionClient.format_size(p["downloaded"])
+            total_text = TransmissionClient.format_size(p["total"])
+            
+            eta_text = f"{int(p['eta'])}s" if p["eta"] > 0 else "∞"
+            peers_text = p["peers"]
+            
             await event.reply(
-                f"`{bar}` {p['progress']:.0f}%\n"
-                f"{DownloadManager.format_size(p['speed'])}/s"
+                f"*⬇️ Descargando: {p['name'][:30]}*\n\n"
+                f"`{bar}` `{p['progress']:.1f}%`\n"
+                f"📊 {speed_text}/s\n"
+                f"📥 {downloaded_text} / {total_text}\n"
+                f"⏱ ETA: {eta_text}\n"
+                f"🌱 Peers: {peers_text}",
+                parse_mode="markdown"
             )
 
         @self.client.on(events.NewMessage(pattern=r"^/cancel$"))
-        async def cancel_cmd(event):
+        async def cancel_handler(event):
             cid = event.chat_id
+            
             if cid not in self.active_tasks:
+                await event.reply("*Nada que cancelar* ⏹", parse_mode="markdown")
                 return
             
-            self.dm.cancel(self.active_tasks[cid])
+            torrent_id = self.active_tasks[cid]["torrent_id"]
+            
+            # Eliminar torrent
+            self.transmission.remove_torrent(torrent_id, delete_data=True)
+            
             del self.active_tasks[cid]
             
             if cid in self.status_msgs:
@@ -668,170 +401,307 @@ class TorrentBot:
                 except:
                     pass
                 del self.status_msgs[cid]
+            
+            await event.reply("*Descarga cancelada* ✓", parse_mode="markdown")
 
         @self.client.on(events.NewMessage)
-        async def msg_handler(event):
+        async def message_handler(event):
             text = (event.message.text or "").strip()
             
+            # Ignorar comandos
             if text.startswith("/"):
                 return
             
-            if text.startswith(("magnet:", "http://", "https://", "ftp://")):
-                await self._download(event, text)
+            # Detectar magnet link
+            if text.startswith("magnet:?xt="):
+                log.info(f"📌 Magnet detectado")
+                await self._start_magnet_download(event, text)
                 return
             
+            # Detectar URL .torrent
+            if text.endswith(".torrent"):
+                log.info(f"📌 URL .torrent detectada")
+                await self._download_torrent_url(event, text)
+                return
+            
+            # Detectar URL HTTP/HTTPS
+            if text.startswith(("http://", "https://", "ftp://")):
+                log.info(f"📌 URL HTTP detectada")
+                await self._start_http_download(event, text)
+                return
+            
+            # Detectar archivo adjunto
             if event.message.document:
-                await self._torrent_file(event)
+                log.info(f"📌 Archivo adjunto detectado")
+                await self._handle_torrent_file(event)
 
-    async def _torrent_file(self, event):
-        """Archivo .torrent"""
+    async def _handle_torrent_file(self, event):
+        """Maneja archivo .torrent adjunto"""
         if not event.message.document:
             return
         
         cid = event.chat_id
         doc = event.message.document
-        fname = doc.file_name or "torrent.torrent"
+        filename = doc.file_name or "torrent.torrent"
         
-        if not fname.lower().endswith(".torrent"):
+        # Verificar que sea un torrent
+        is_torrent = (
+            "torrent" in (doc.mime_type or "").lower() or
+            filename.lower().endswith(".torrent")
+        )
+        
+        if not is_torrent:
+            await event.reply("*❌ Solo archivos .torrent*", parse_mode="markdown")
             return
         
         if cid in self.active_tasks:
-            await event.reply("*Ya hay descarga*")
+            await event.reply("*Ya hay descarga activa* 🔄", parse_mode="markdown")
             return
         
-        sm = await event.reply("*⏳ Procesando...*")
+        sm = await event.reply("*⏳ Procesando archivo .torrent...*", parse_mode="markdown")
         self.status_msgs[cid] = sm
         
         try:
-            data = await event.message.download_media(bytes)
-            if not data:
-                await sm.edit("*❌ Error*")
+            log.info(f"📥 Descargando archivo: {filename}")
+            file_data = await event.message.download_media(bytes)
+            
+            if not file_data or len(file_data) == 0:
+                log.error("Archivo vacío")
+                await sm.edit("*❌ Archivo vacío*")
                 return
             
-            info = self.dm.add_torrent_file(data, fname)
-            self.active_tasks[cid] = info["download_id"]
+            log.info(f"📦 Agregando a Transmission: {len(file_data)} bytes")
+            info = self.transmission.add_torrent_file(file_data, filename)
             
-            size_text = DownloadManager.format_size(info.get("size", 0))
+            self.active_tasks[cid] = {
+                "torrent_id": info["torrent_id"],
+                "name": info["name"],
+                "task": None
+            }
             
             await sm.edit(
-                f"*✅ {info['name'][:40]}*\n"
-                f"📊 {size_text}\n"
-                f"`{self._bar(0)}` 0%"
+                f"*✅ Torrent agregado:*\n"
+                f"`{info['name'][:40]}`\n\n"
+                f"`{self._progress_bar(0)}` 0%"
             )
             
-            self.dm.start(info["download_id"])
-            asyncio.create_task(self._monitor(cid, info["download_id"]))
+            # Iniciar descarga
+            self.transmission.start_torrent(info["torrent_id"])
+            
+            # Monitorear
+            asyncio.create_task(self._monitor_torrent(cid))
             
         except Exception as e:
-            log.error(f"Error: {e}")
-            await sm.edit("*❌ Error*")
+            log.error(f"Error: {e}", exc_info=True)
+            await sm.edit(f"*❌ Error:* `{str(e)[:100]}`")
+            if cid in self.active_tasks:
+                del self.active_tasks[cid]
 
-    async def _download(self, event, text):
-        """Inicia"""
+    async def _start_magnet_download(self, event, magnet_uri: str):
+        """Inicia descarga de magnet"""
         cid = event.chat_id
         
         if cid in self.active_tasks:
-            await event.reply("*Ya hay*")
+            await event.reply("*Ya hay descarga activa* 🔄", parse_mode="markdown")
             return
         
-        sm = await event.reply("*⏳ Procesando...*")
+        sm = await event.reply("*⏳ Procesando magnet...*", parse_mode="markdown")
         self.status_msgs[cid] = sm
         
         try:
-            if text.startswith("magnet:"):
-                info = self.dm.add_magnet(text)
-                await sm.edit(f"*✅ {info['name'][:40]}*\n`{self._bar(0)}` 0%")
-            elif text.endswith(".torrent"):
-                await sm.edit("*⏳ Descargando...*")
-                r = requests.get(text, timeout=30)
-                if r.status_code != 200:
-                    await sm.edit("*❌ Error*")
-                    return
-                info = self.dm.add_torrent_file(r.content, text.split("/")[-1])
-                size_text = DownloadManager.format_size(info.get("size", 0))
-                await sm.edit(f"*✅ {info['name'][:40]}*\n📊 {size_text}\n`{self._bar(0)}` 0%")
-            else:
-                fname = text.split("/")[-1] or "descarga"
-                info = self.dm.add_http(text, fname)
-                await sm.edit(f"*✅ {info['name'][:40]}*\n`{self._bar(0)}` 0%")
+            log.info(f"📥 Agregando magnet")
+            info = self.transmission.add_magnet(magnet_uri)
             
-            self.active_tasks[cid] = info["download_id"]
+            self.active_tasks[cid] = {
+                "torrent_id": info["torrent_id"],
+                "name": info["name"],
+                "task": None
+            }
             
-            self.dm.start(info["download_id"])
-            asyncio.create_task(self._monitor(cid, info["download_id"]))
+            await sm.edit(
+                f"*✅ Magnet agregado:*\n"
+                f"`{info['name'][:40]}`\n\n"
+                f"`{self._progress_bar(0)}` 0%"
+            )
+            
+            # Iniciar descarga
+            self.transmission.start_torrent(info["torrent_id"])
+            
+            # Monitorear
+            asyncio.create_task(self._monitor_torrent(cid))
             
         except Exception as e:
             log.error(f"Error: {e}")
-            await sm.edit("*❌ Error*")
+            await sm.edit(f"*❌ Error:* `{str(e)[:100]}`")
 
-    async def _monitor(self, cid, did):
-        """Monitorea"""
+    async def _download_torrent_url(self, event, url: str):
+        """Descarga .torrent desde URL"""
+        cid = event.chat_id
+        
+        if cid in self.active_tasks:
+            await event.reply("*Ya hay descarga activa* 🔄", parse_mode="markdown")
+            return
+        
+        sm = await event.reply("*⏳ Descargando archivo .torrent...*", parse_mode="markdown")
+        self.status_msgs[cid] = sm
+        
         try:
-            last_p = -1
+            log.info(f"📥 Descargando torrent desde URL: {url}")
+            
+            r = requests.get(url, timeout=30)
+            if r.status_code != 200:
+                await sm.edit(f"*❌ Error HTTP {r.status_code}*")
+                return
+            
+            filename = url.split("/")[-1] or "torrent.torrent"
+            
+            log.info(f"📦 Agregando a Transmission")
+            info = self.transmission.add_torrent_file(r.content, filename)
+            
+            self.active_tasks[cid] = {
+                "torrent_id": info["torrent_id"],
+                "name": info["name"],
+                "task": None
+            }
+            
+            await sm.edit(
+                f"*✅ Torrent descargado:*\n"
+                f"`{info['name'][:40]}`\n\n"
+                f"`{self._progress_bar(0)}` 0%"
+            )
+            
+            # Iniciar descarga
+            self.transmission.start_torrent(info["torrent_id"])
+            
+            # Monitorear
+            asyncio.create_task(self._monitor_torrent(cid))
+            
+        except Exception as e:
+            log.error(f"Error: {e}")
+            await sm.edit(f"*❌ Error:* `{str(e)[:100]}`")
+
+    async def _start_http_download(self, event, url: str):
+        """Descarga archivo HTTP"""
+        cid = event.chat_id
+        
+        if cid in self.active_tasks:
+            await event.reply("*Ya hay descarga activa* 🔄", parse_mode="markdown")
+            return
+        
+        sm = await event.reply("*⏳ Iniciando descarga...*", parse_mode="markdown")
+        self.status_msgs[cid] = sm
+        
+        try:
+            filename = url.split("/")[-1] or "descarga"
+            file_path = self.storage / filename
+            
+            # Descargar
+            log.info(f"📥 Descargando: {url}")
+            
+            r = requests.get(url, timeout=60, stream=True)
+            r.raise_for_status()
+            
+            total_size = int(r.headers.get("content-length", 0))
+            
+            downloaded = 0
+            start_time = time.time()
+            
+            with open(file_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=5*1024*1024):
+                    if cid not in self.active_tasks:
+                        file_path.unlink(missing_ok=True)
+                        return
+                    
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if total_size > 0:
+                            progress = (downloaded / total_size) * 100
+                            bar = self._progress_bar(int(progress))
+                            
+                            speed = downloaded / (time.time() - start_time)
+                            speed_text = TransmissionClient.format_size(int(speed))
+                            
+                            try:
+                                await sm.edit(
+                                    f"*📥 Descargando: {filename[:30]}*\n\n"
+                                    f"`{bar}` {progress:.1f}%\n"
+                                    f"{speed_text}/s"
+                                )
+                            except:
+                                pass
+            
+            self.active_tasks[cid] = {"torrent_id": -1, "name": filename}
+            
+            # Subir
+            await self._upload_file(cid, file_path)
+            
+        except Exception as e:
+            log.error(f"Error: {e}")
+            await sm.edit(f"*❌ Error:* `{str(e)[:100]}`")
+
+    async def _monitor_torrent(self, cid: int):
+        """Monitorea descarga del torrent"""
+        try:
+            if cid not in self.active_tasks:
+                return
+            
+            torrent_id = self.active_tasks[cid]["torrent_id"]
+            last_progress = -1
             
             while cid in self.active_tasks:
-                p = self.dm.get_progress(did)
+                p = self.transmission.get_progress(torrent_id)
+                
                 if not p:
                     await asyncio.sleep(1)
                     continue
                 
-                if int(p["progress"]) != last_p:
-                    last_p = int(p["progress"])
-                    bar = self._bar(int(p["progress"]))
-                    speed = DownloadManager.format_size(p["speed"])
-                    down = DownloadManager.format_size(p["downloaded"])
-                    total = DownloadManager.format_size(p["total"])
+                # Actualizar progreso
+                if int(p["progress"]) != last_progress:
+                    last_progress = int(p["progress"])
+                    
+                    bar = self._progress_bar(int(p["progress"]))
+                    speed_text = TransmissionClient.format_size(int(p["speed"]))
+                    downloaded_text = TransmissionClient.format_size(int(p["downloaded"]))
+                    total_text = TransmissionClient.format_size(int(p["total"]))
+                    
+                    eta_text = f"{int(p['eta'])}s" if p["eta"] > 0 else "∞"
                     
                     try:
-                        await self.status_msgs[cid].edit(
-                            f"`{bar}` {p['progress']:.0f}%\n{speed}/s\n{down}/{total}"
-                        )
+                        if cid in self.status_msgs:
+                            await self.status_msgs[cid].edit(
+                                f"*⬇️ Descargando: {p['name'][:30]}*\n\n"
+                                f"`{bar}` `{p['progress']:.1f}%`\n"
+                                f"📊 {speed_text}/s\n"
+                                f"📥 {downloaded_text} / {total_text}\n"
+                                f"⏱ ETA: {eta_text}"
+                            )
                     except:
                         pass
                 
-                if p["status"] in ["completed", "error", "cancelled"]:
+                # Completado
+                if p["progress"] >= 100:
+                    log.info(f"✅ Descarga completada: {p['name']}")
                     break
                 
                 await asyncio.sleep(1)
             
-            # Subir
-            try:
-                await self.status_msgs[cid].edit("*✅ Subiendo...*")
-            except:
-                pass
-            
-            files = self.dm.get_files()
-            if files:
-                ok = 0
-                for fpath in files:
-                    try:
-                        if os.path.getsize(fpath) == 0:
-                            continue
-                        
-                        fname = os.path.basename(fpath)
-                        
-                        await self.client.send_file(
-                            self.config.CHANNEL_ID,
-                            file=fpath,
-                            caption=fname,
-                            force_document=True
-                        )
-                        
-                        try:
-                            os.remove(fpath)
-                            log.info(f"🗑️ {fname}")
-                        except:
-                            pass
-                        
-                        ok += 1
-                        await asyncio.sleep(0.5)
-                    except Exception as e:
-                        log.error(f"Upload: {e}")
+            # Descarga completada - Subir archivos
+            if cid in self.active_tasks:
+                await self._msg(cid, "*✅ Descarga completada! Subiendo...*")
                 
-                await self.client.send_message(cid, f"*✅ {ok} archivos*")
+                files = self.transmission.get_files(torrent_id)
+                if files:
+                    await self._upload_files(cid, files)
+                else:
+                    await self._msg(cid, "*⚠ Sin archivos para subir*")
+                
+                # Eliminar torrent
+                self.transmission.remove_torrent(torrent_id, delete_data=True)
                 
         except Exception as e:
-            log.error(f"Monitor: {e}")
+            log.error(f"Error monitor: {e}")
         finally:
             if cid in self.active_tasks:
                 del self.active_tasks[cid]
@@ -843,39 +713,122 @@ class TorrentBot:
                 if cid in self.status_msgs:
                     del self.status_msgs[cid]
 
+    async def _upload_files(self, cid: int, files: List[str]):
+        """Sube múltiples archivos"""
+        uploaded = 0
+        failed = 0
+        
+        for file_path in files[:5]:
+            try:
+                if not os.path.exists(file_path):
+                    continue
+                
+                file_size = os.path.getsize(file_path)
+                if file_size == 0:
+                    continue
+                
+                await self._upload_file(cid, Path(file_path))
+                uploaded += 1
+                
+            except Exception as e:
+                log.error(f"Error: {e}")
+                failed += 1
+            
+            await asyncio.sleep(0.5)
+        
+        # Mensaje final
+        if uploaded > 0:
+            msg = f"*✅ Completado!*\n📦 {uploaded} archivo(s) subido(s)"
+        else:
+            msg = "*❌ Error en upload*"
+        
+        if failed > 0:
+            msg = f"*⚠️ Parcial*\n✅ {uploaded} OK\n❌ {failed} falló"
+        
+        try:
+            await self.client.send_message(cid, msg, parse_mode="markdown")
+        except:
+            pass
+
+    async def _upload_file(self, cid: int, file_path: Path):
+        """Sube un archivo a Telegram"""
+        try:
+            filename = file_path.name
+            file_size = file_path.stat().st_size
+            
+            log.info(f"📤 Subiendo: {filename} ({TransmissionClient.format_size(file_size)})")
+            
+            await self._msg(cid, f"*📤 Subiendo:* `{filename[:30]}`")
+            
+            # Subir a Telegram
+            await self.client.send_file(
+                self.config.CHANNEL_ID,
+                file=str(file_path),
+                caption=filename,
+                force_document=True
+            )
+            
+            # Eliminar archivo local
+            try:
+                file_path.unlink()
+                log.info(f"🗑️ Eliminado: {filename}")
+            except Exception as e:
+                log.warning(f"No se pudo eliminar: {e}")
+            
+            log.info(f"✅ Enviado: {filename}")
+            
+        except Exception as e:
+            log.error(f"Error upload: {e}")
+            raise
+
+    async def _msg(self, cid: int, text: str):
+        """Actualiza mensaje de estado"""
+        if cid in self.status_msgs:
+            try:
+                await self.status_msgs[cid].edit(text)
+            except:
+                pass
+
     @staticmethod
-    def _bar(p: int) -> str:
-        """Barra"""
-        filled = min(int(p / 5), 20)
-        return "█" * filled + "░" * (20 - filled)
+    def _progress_bar(progress: int) -> str:
+        """Crea barra de progreso"""
+        filled = min(int(progress / 5), 20)
+        empty = 20 - filled
+        return "█" * filled + "░" * empty
 
     async def stop(self):
-        """Detiene"""
+        """Detiene el bot"""
         log.info("🛑 Deteniendo...")
-        self.dm.close()
+        self.transmission.close()
         await self.client.disconnect()
+        log.info("✓ Detenido")
 
 # ═══ MAIN ════════════════════════════════════════════════════════════════════
 async def main(bot):
+    """Main async"""
     try:
         await bot.start()
     except KeyboardInterrupt:
-        pass
+        log.info("Interrupción del usuario")
     finally:
         await bot.stop()
 
 if __name__ == "__main__":
-    log.info("=" * 60)
-    log.info("🚀 TeleTorrent Bot v7.0 - DEFINITIVA")
-    log.info("=" * 60)
+    log.info("=" * 70)
+    log.info("🚀 TeleTorrent Bot v8.0 - CON TRANSMISSION")
+    log.info("=" * 70)
     
     bot = TorrentBot()
     
     def signal_handler(signum, frame):
+        log.info("Señal recibida, cerrando...")
         asyncio.create_task(bot.stop())
         sys.exit(0)
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    asyncio.run(main(bot))
+    try:
+        asyncio.run(main(bot))
+    except Exception as e:
+        log.error(f"Fatal: {e}")
